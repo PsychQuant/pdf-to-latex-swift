@@ -1,0 +1,32 @@
+import Foundation
+
+public enum ProjectLayout {
+    public static let manifestFileName = "manifest.json"
+
+    public static let requiredDirectories = [
+        "input",
+        "pages",
+        "blocks",
+        "snippets",
+        "lossless",
+        "semantic",
+        "reports",
+        "layouts",
+        "tmp",
+    ]
+
+    public static func create(at root: URL, fileManager: FileManager = .default) throws {
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        for directory in requiredDirectories {
+            try fileManager.createDirectory(
+                at: root.appendingPathComponent(directory, isDirectory: true),
+                withIntermediateDirectories: true
+            )
+        }
+    }
+
+    public static func manifestURL(for root: URL) -> URL {
+        root.appendingPathComponent(manifestFileName)
+    }
+}
