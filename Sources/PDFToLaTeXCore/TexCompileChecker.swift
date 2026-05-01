@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// 編譯錯誤分類。
 public enum CompileErrorCategory: String, Codable, Sendable, Equatable {
@@ -6,6 +7,7 @@ public enum CompileErrorCategory: String, Codable, Sendable, Equatable {
     case missingMath = "missing_math"
     case missingBrace = "missing_brace"
     case environment = "environment"
+    case timeout
     case other
 }
 
@@ -39,9 +41,24 @@ public struct CompileReport: Codable, Sendable {
     }
 }
 
+/// pdflatex 編譯檢查設定。
+public struct TexCompileOptions: Sendable, Equatable {
+    public let pdflatexCommand: String
+    public let timeoutSeconds: TimeInterval
+
+    public init(pdflatexCommand: String = "pdflatex", timeoutSeconds: TimeInterval = 120) {
+        self.pdflatexCommand = pdflatexCommand
+        self.timeoutSeconds = timeoutSeconds
+    }
+}
+
 /// 解析 pdflatex 編譯 log，產生結構化錯誤報告。
 public struct TexCompileChecker: Sendable {
-    public init() {}
+    public let options: TexCompileOptions
+
+    public init(options: TexCompileOptions = TexCompileOptions()) {
+        self.options = options
+    }
 
     // MARK: - Parse Log
 
@@ -140,8 +157,8 @@ public struct TexCompileChecker: Sendable {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.currentDirectoryURL = dir
         process.arguments = [
-            "pdflatex",
-            "-interaction=nonstopmode",
+            options.pdflatexCommand,
+            "-interaction=batchmode",
             "-file-line-error",
             filename,
         ]
@@ -150,9 +167,12 @@ public struct TexCompileChecker: Sendable {
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        let nullInput = FileHandle(forReadingAtPath: "/dev/null")
+        process.standardInput = nullInput
 
         try process.run()
-        process.waitUntilExit()
+        let timedOut = waitForExitOrTerminate(process)
+        nullInput?.closeFile()
 
         // 讀取 .log 檔（比 stdout 更完整）
         let logURL = dir.appendingPathComponent(
@@ -163,20 +183,33 @@ public struct TexCompileChecker: Sendable {
         if FileManager.default.fileExists(atPath: logURL.path) {
             logContent = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
         } else {
-            logContent = String(
+            let stdout = String(
                 data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
                 encoding: .utf8
             ) ?? ""
+            let stderr = String(
+                data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? ""
+            logContent = ([stdout, stderr].filter { !$0.isEmpty }).joined(separator: "\n")
         }
 
-        let errors = Self.parseLog(logContent)
+        var errors = Self.parseLog(logContent)
+        if timedOut {
+            errors.insert(CompileError(
+                category: .timeout,
+                line: nil,
+                message: "pdflatex timed out after \(options.timeoutSeconds) seconds",
+                rawLog: logContent
+            ), at: 0)
+        }
         let warningCount = logContent.components(separatedBy: "LaTeX Warning:").count - 1
 
         return CompileReport(
             texFile: texFileURL.path,
             errors: errors,
             warningCount: warningCount,
-            success: process.terminationStatus == 0 && errors.isEmpty
+            success: !timedOut && process.terminationStatus == 0 && errors.isEmpty
         )
     }
 
@@ -208,6 +241,28 @@ public struct TexCompileChecker: Sendable {
             return .environment
         }
         return .other
+    }
+
+    private func waitForExitOrTerminate(_ process: Process) -> Bool {
+        let timeoutMilliseconds = max(1, Int(options.timeoutSeconds * 1000))
+        let semaphore = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in
+            semaphore.signal()
+        }
+
+        let waitResult = semaphore.wait(timeout: .now() + .milliseconds(timeoutMilliseconds))
+        let timedOut = waitResult == .timedOut
+
+        if timedOut {
+            process.terminate()
+            if semaphore.wait(timeout: .now() + .seconds(2)) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+            }
+        }
+
+        process.waitUntilExit()
+        process.terminationHandler = nil
+        return timedOut
     }
 
     /// 從 log 行解析行號 (l.NNN 格式)。
