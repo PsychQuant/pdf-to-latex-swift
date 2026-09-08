@@ -41,7 +41,7 @@ public struct AIConfig: Codable, Sendable, Equatable {
 
     // MARK: - Backward-compatible Decoding
 
-    private enum CodingKeys: String, CodingKey {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
         case available, transcription, agent
         case ocrHosts, ocrDefaultHost, ocrDefaultModel, ocrDefaultBackend
     }
@@ -82,12 +82,32 @@ public struct AIConfig: Codable, Sendable, Equatable {
 
     public func save(to url: URL? = nil) throws {
         let configURL = url ?? AIConfig.defaultConfigURL
-        let dir = configURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(self)
+        let known = try Self.configurationObject(from: JSONEncoder().encode(self))
+        var merged: [String: Any] = [:]
+        if FileManager.default.fileExists(atPath: configURL.path) {
+            // Read at save time: other consumers own fields such as document.
+            // Invalid existing data must fail before any replacement occurs.
+            merged = try Self.configurationObject(from: Data(contentsOf: configURL))
+        }
+        // Removing every owned key first also honors optional fields cleared
+        // to nil; merging only encoded values would resurrect the old value.
+        for key in CodingKeys.allCases {
+            merged.removeValue(forKey: key.rawValue)
+        }
+        merged.merge(known) { _, updated in updated }
+        let data = try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys])
+        try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: configURL, options: .atomic)
+    }
+
+    private static func configurationObject(from data: Data) throws -> [String: Any] {
+        let value = try JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed)
+        guard let object = value as? [String: Any] else {
+            throw NSError(
+                domain: "PDFToLaTeXCore.AIConfig", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "設定檔的根節點必須是 JSON object。"])
+        }
+        return object
     }
 
     // MARK: - Detect
