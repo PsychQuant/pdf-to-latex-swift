@@ -86,6 +86,49 @@ final class AIConfigPreservationTests: XCTestCase {
         }
     }
 
+    // NSNumber equality treats JSON `true` and `1` as equal, so comparing
+    // dictionaries cannot tell a boolean that silently became a number.
+    // Inspect the CoreFoundation type of every re-parsed token instead.
+    func testNestedBooleanAndNumberTokensKeepTheirJSONType() throws {
+        let initial = Data(#"{"document":{"flags":[true,false],"counts":[0,1],"ratio":1.5,"nested":{"on":true,"one":1}}}"#.utf8)
+        try withConfigFile(initial) { url in
+            var config = try AIConfig.load(from: url)
+            config.agent = "codex"
+            try config.save(to: url)
+            let document = try XCTUnwrap(try object(at: url)["document"] as? [String: Any])
+            let flags = try XCTUnwrap(document["flags"] as? [NSNumber])
+            let counts = try XCTUnwrap(document["counts"] as? [NSNumber])
+            let nested = try XCTUnwrap(document["nested"] as? [String: NSNumber])
+            XCTAssertEqual(flags.map(isJSONBoolean), [true, true])
+            XCTAssertEqual(flags.map(\.boolValue), [true, false])
+            XCTAssertEqual(counts.map(isJSONBoolean), [false, false])
+            XCTAssertEqual(counts.map(\.intValue), [0, 1])
+            XCTAssertEqual((document["ratio"] as? NSNumber)?.doubleValue, 1.5)
+            XCTAssertEqual(nested.mapValues(isJSONBoolean), ["on": true, "one": false])
+        }
+    }
+
+    func testSaveCreatesMissingFileAndParentDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("nested/config.json")
+        var config = AIConfig()
+        config.agent = "gemini"
+        try config.save(to: url)
+        XCTAssertEqual(try object(at: url)["agent"] as? String, "gemini")
+    }
+
+    func testEmptyExistingFileIsNotOverwritten() throws {
+        try withConfigFile(Data()) { url in
+            XCTAssertThrowsError(try AIConfig().save(to: url))
+            XCTAssertEqual(try Data(contentsOf: url), Data())
+        }
+    }
+
+    private func isJSONBoolean(_ number: NSNumber) -> Bool {
+        CFGetTypeID(number) == CFBooleanGetTypeID()
+    }
+
     private func object(at url: URL) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
     }
