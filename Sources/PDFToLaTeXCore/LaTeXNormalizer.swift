@@ -131,14 +131,14 @@ public struct LaTeXNormalizer: Sendable {
     /// 刪除頁首那 k 行，再重新比較，直到沒有重疊。只有「連續的一段」重疊才算重複：頁首某一行只是
     /// 在頁尾出現過（例如 `\centering`、`\end{table}`）不刪。
     ///
-    /// 可比對行（封閉列舉，三個條件都要成立）：
-    /// 1. 去掉頭尾空格、tab 與 CR 後非空；
-    /// 2. 不以 `%%` 開頭（marker 與轉寫註記）；
-    /// 3. 不碰到 verbatim（`LaTeXSourceScan.lineTouchesVerbatim`）：`\begin{verbatim}` 那一行、
-    ///    verbatim 內容、`\end{verbatim}` 那一行、含 `\verb` 的行。刪掉其中任何一行都可能讓
-    ///    verbatim 提早結束或吞掉後文，所以這些行既不比對、也不刪。
-    ///
-    /// 不可比對的行不刪、也不打斷比對（夾在重複行之間的空行與註解保留在原位）。
+    /// 每一行屬於以下三類之一（封閉列舉）：
+    /// 1. **阻隔**：碰到 verbatim 的行（`LaTeXSourceScan.lineTouchesVerbatim`：`\begin{verbatim}` 那一行、
+    ///    verbatim 內容、`\end{verbatim}` 那一行、含 `\verb` 的行）。頁尾往前、頁首往後遇到它就停；
+    ///    它不比對、不刪，也不能被跳過（跳過整個 verbatim 區塊去比它後面的正文，會刪掉只是碰巧與
+    ///    頁尾相同的正文）。刪掉其中任何一行都可能讓 verbatim 提早結束或吞掉後文。
+    /// 2. **略過**：去掉頭尾空格、tab 與 CR 後是空的，或以 `%%` 開頭（marker 與轉寫註記）。不比對、
+    ///    不刪，也不打斷比對（夾在重複行之間的空行與註記保留在原位）。
+    /// 3. **可比對**：其他行。
     ///
     /// ## 冪等
     ///
@@ -154,20 +154,28 @@ public struct LaTeXNormalizer: Sendable {
         let lines = source.components(separatedBy: "\n")
         let blanks = CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\r"))
         let keys = lines.map { $0.trimmingCharacters(in: blanks) }
-        let comparable = lines.indices.map { index in
-            !keys[index].isEmpty && !keys[index].hasPrefix("%%") && !scan.lineTouchesVerbatim(index)
-        }
+        let barrier = lines.indices.map { scan.lineTouchesVerbatim($0) }
+        let skipped = keys.map { $0.isEmpty || $0.hasPrefix("%%") }
 
         var removed = Set<Int>()
         for (position, boundary) in boundaries.enumerated() {
             let pageStart = position > 0 ? boundaries[position - 1] + 1 : 0
             let nextBoundary = position + 1 < boundaries.count ? boundaries[position + 1] : lines.count
-            let tail = Array((pageStart..<boundary).filter { comparable[$0] && !removed.contains($0) }.suffix(windowSize))
+            var tail: [Int] = []
+            var back = boundary - 1
+            while back >= pageStart && tail.count < windowSize && !barrier[back] {
+                if !skipped[back] && !removed.contains(back) { tail.append(back) }
+                back -= 1
+            }
+            tail.reverse()
 
             while true {
-                let head = Array(((boundary + 1)..<nextBoundary).lazy
-                    .filter { comparable[$0] && !removed.contains($0) }
-                    .prefix(windowSize))
+                var head: [Int] = []
+                var forward = boundary + 1
+                while forward < nextBoundary && head.count < windowSize && !barrier[forward] {
+                    if !skipped[forward] && !removed.contains(forward) { head.append(forward) }
+                    forward += 1
+                }
                 let overlap = stride(from: min(tail.count, head.count), through: 1, by: -1).first { k in
                     zip(tail.suffix(k), head.prefix(k)).allSatisfy { keys[$0] == keys[$1] }
                 } ?? 0

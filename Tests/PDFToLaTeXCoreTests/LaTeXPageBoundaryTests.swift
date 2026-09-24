@@ -139,6 +139,39 @@ final class LaTeXPageBoundaryTests: XCTestCase {
         XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input)
     }
 
+    /// 碰到 verbatim 的行是比對的阻隔（Codex R1 HIGH）：頁首遇到 verbatim 就停，不會跳過整個 verbatim
+    /// 區塊去刪它後面、只是碰巧與頁尾相同的正文。
+    func testDedup_headStopsAtVerbatim() {
+        let input = """
+        \\documentclass{article}
+        \\begin{document}
+        Example.
+        %% === Page 2 ===
+        \\begin{verbatim}
+        print("example")
+        \\end{verbatim}
+        Example.
+        \\end{document}
+        """
+        XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input)
+    }
+
+    /// 同上，頁尾往前遇到 verbatim 就停：頁尾的最後內容是 verbatim 區塊時，不拿更前面的正文來比。
+    func testDedup_tailStopsAtVerbatim() {
+        let input = """
+        \\begin{document}
+        Example.
+        \\begin{verbatim}
+        print("example")
+        \\end{verbatim}
+        %% === Page 2 ===
+        Example.
+        More text.
+        \\end{document}
+        """
+        XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input)
+    }
+
     /// 真正的重複（前一頁最後幾行在下一頁開頭又出現）照常刪除；marker 之後的空行與 `%%` 註解
     /// 不影響比對，也不會被刪。
     func testDedup_contiguousOverlapIsRemovedAndBlankLinesKept() {
