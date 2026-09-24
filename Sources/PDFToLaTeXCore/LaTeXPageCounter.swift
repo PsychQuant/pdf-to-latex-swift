@@ -61,8 +61,9 @@ extension LaTeXNormalizer {
     /// ## 錨點（封閉列舉，只有這三類）與其結尾
     ///
     /// 1. **第一個 page marker**：結尾是 marker 行的行尾。
-    /// 2. **章節邊界**：一行的第一個非空白 token 是 `\chapter` 控制字（`\chapterauthor` 不算）。
-    ///    結尾是章名的閉合大括號；`*`、`[短標題]`、`{章名}` 之間可以有空白、換行與註解，章名長度
+    /// 2. **章節邊界**：每一個作用中的 `\chapter` 控制字（`\chapterauthor` 不算），不論在行首或行中；
+    ///    同一行有多個 `\chapter` 時每個都是錨點。（只認行首會不冪等：第一輪在第一個章名之後斷行插入，
+    ///    讓第二個 `\chapter` 變成行首，第二輪才被認出。）結尾是章名的閉合大括號；`*`、`[短標題]`、`{章名}` 之間可以有空白、換行與註解，章名長度
     ///    不設上限。理由：`\chapter` 會先 `\clearpage`／`\cleardoublepage`，counter 放在它之前會
     ///    被記到前一頁，章首頁變成 N+1（pdflatex 實測：前 → 19、後 → 18）。
     /// 3. **切回阿拉伯數字**：`\mainmatter`（結尾是指令名稱）或 `\pagenumbering{arabic}`（結尾是
@@ -79,8 +80,10 @@ extension LaTeXNormalizer {
     ///
     /// ## 章節錨點的既有 counter
     ///
-    /// - 章名之後的下一個 token 已是 `\setcounter{page}`：視為已處理，不動。
-    /// - `\chapter` 前一行是 `\setcounter{page}{M}`（且那一行不是緊接上一章之後的 counter）：
+    /// - 章名之後的下一個 token 已是 `\setcounter{page}`：視為已處理，不動（找下一個 token 時不跨過
+    ///   page marker：下一頁的 counter 不算這個錨點的）。
+    /// - `\chapter` 是該行第一個 token，且前一行是 `\setcounter{page}{M}`（那一行不是緊接上一章之後的
+    ///   counter）：
     ///   M 等於 N → 這是舊版的放法，把那一行原樣移到章名之後（`legacyCounterMoved`）；
     ///   M 不等於 N → 原樣保留、該章不插入，回報 `conflictingCounterBeforeChapter`。
     ///
@@ -119,14 +122,14 @@ extension LaTeXNormalizer {
         var chapters: [ChapterCommand] = []
         for word in scan.controlWords where word.name == "chapter" && scan.isActive(word.start) {
             let line = scan.line(of: word.start)
-            guard scan.firstNonBlank(line: line) == word.start else { continue }
             guard let end = chapterCommandEnd(scan, after: word.end) else {
                 return PageCounterReport(
                     result: source, notes: [PageCounterNote(line: line + 1, kind: .chapterTitleNotFound)]
                 )
             }
             chapters.append(ChapterCommand(
-                offset: word.start, end: end, startLine: line, endLine: scan.line(of: end - 1)
+                offset: word.start, end: end, startLine: line, endLine: scan.line(of: end - 1),
+                firstOnLine: scan.firstNonBlank(line: line) == word.start
             ))
         }
 
@@ -140,11 +143,35 @@ extension LaTeXNormalizer {
         events += chapters.map { .chapter($0) }
         events.sort { $0.offset < $1.offset }
 
-        let context = AnchorContext(
+        var context = AnchorContext(
             scan: scan,
             takeoverOffsets: Set(chapters.map(\.offset)).union(switches.map(\.offset)),
-            chapterEndLines: Set(chapters.map(\.endLine))
+            chapterEndLines: Set(chapters.map(\.endLine)),
+            markerOffsets: Set(scan.pageMarkers.map(\.offset)),
+            ownedLegacyLines: [:]
         )
+
+        // 先決定哪些舊版 counter 會被移走（由最後一章往前：「後面已有 counter」的判定只看後面），
+        // 之後所有判定都把這些行當成已經不在，也就是用第二輪會看到的文件來判斷。
+        var styleAtChapter: [Int: PageNumberingStyle] = [:]
+        var runningStyle = PageNumberingStyle.arabic
+        for event in events {
+            switch event {
+            case .numberingSwitch(let change): runningStyle = change.style
+            case .chapter(let chapter): styleAtChapter[chapter.offset] = runningStyle
+            case .firstMarker: break
+            }
+        }
+        for chapter in chapters.reversed() {
+            guard styleAtChapter[chapter.offset] == .arabic,
+                  let page = context.nearestPage(before: chapter.offset),
+                  !context.pageCounterFollows(chapter.end) else { continue }
+            let previous = chapter.startLine - 1
+            if chapter.firstOnLine, !context.chapterEndLines.contains(previous - 1),
+               context.pageCounterValue(line: previous) == page {
+                context.ownedLegacyLines[previous] = chapter.offset
+            }
+        }
 
         var style = PageNumberingStyle.arabic
         var edits: [(range: Range<Int>, text: String)] = []
@@ -174,22 +201,21 @@ extension LaTeXNormalizer {
                 insertCounter(page: marker.page, after: end, anchorLine: marker.line)
 
             case .chapter(let chapter):
-                guard style == .arabic,
-                      let page = context.nearestPage(before: chapter.offset),
-                      !context.pageCounterFollows(chapter.end) else { continue }
+                guard style == .arabic, let page = context.nearestPage(before: chapter.offset) else { continue }
                 let previous = chapter.startLine - 1
-                if !context.chapterEndLines.contains(previous - 1),
+                if context.ownedLegacyLines[previous] == chapter.offset {
+                    edits.append((context.wholeLine(previous), ""))
+                    edits.append(context.insertion(after: chapter.end, text: context.lineContent(previous)))
+                    notes.append(PageCounterNote(line: chapter.startLine + 1, kind: .legacyCounterMoved(page: page)))
+                    continue
+                }
+                guard !context.pageCounterFollows(chapter.end) else { continue }
+                if chapter.firstOnLine, !context.chapterEndLines.contains(previous - 1),
                    let existing = context.pageCounterValue(line: previous) {
-                    if existing == page {
-                        edits.append((context.wholeLine(previous), ""))
-                        edits.append(context.insertion(after: chapter.end, text: context.lineContent(previous)))
-                        notes.append(PageCounterNote(line: chapter.startLine + 1, kind: .legacyCounterMoved(page: page)))
-                    } else {
-                        notes.append(PageCounterNote(
-                            line: chapter.startLine + 1,
-                            kind: .conflictingCounterBeforeChapter(existing: existing, expected: page)
-                        ))
-                    }
+                    notes.append(PageCounterNote(
+                        line: chapter.startLine + 1,
+                        kind: .conflictingCounterBeforeChapter(existing: existing, expected: page)
+                    ))
                     continue
                 }
                 insertCounter(page: page, after: chapter.end, anchorLine: chapter.startLine)
@@ -199,11 +225,20 @@ extension LaTeXNormalizer {
         guard !edits.isEmpty else {
             return PageCounterReport(result: source, notes: notes)
         }
-        var units = scan.units
         // 由後往前套用；同一個起點時先套用範圍較大的（刪除），再套用插入。
-        for edit in edits.sorted(by: {
+        let ordered = edits.sorted(by: {
             ($0.range.lowerBound, $0.range.upperBound) > ($1.range.lowerBound, $1.range.upperBound)
-        }) {
+        })
+        // 安全網：編輯不可重疊（插入點可以落在刪除範圍的起點）。重疊代表邏輯錯誤：debug 直接中止，
+        // release 則原樣回傳，絕不輸出被弄壞的原文。
+        for (later, earlier) in zip(ordered, ordered.dropFirst())
+        where earlier.range.upperBound > later.range.lowerBound
+            || (earlier.range.lowerBound == later.range.lowerBound && !later.range.isEmpty && !earlier.range.isEmpty) {
+            assertionFailure("overlapping page-counter edits: \(earlier.range) / \(later.range)")
+            return PageCounterReport(result: source, notes: [])
+        }
+        var units = scan.units
+        for edit in ordered {
             units.replaceSubrange(edit.range, with: Array(edit.text.utf16))
         }
         return PageCounterReport(result: String(decoding: units, as: UTF16.self), notes: notes)
@@ -261,6 +296,8 @@ private struct ChapterCommand {
     let end: Int
     let startLine: Int
     let endLine: Int
+    /// `\chapter` 是否為該行第一個 token（舊版 counter 的判定只適用於這種）。
+    let firstOnLine: Bool
 }
 
 private struct NumberingSwitch {
@@ -290,6 +327,10 @@ private struct AnchorContext {
     /// 章節錨點與切換指令的起點：錨點 1、3 之後的下一個 token 若在此，就交給它處理。
     let takeoverOffsets: Set<Int>
     let chapterEndLines: Set<Int>
+    let markerOffsets: Set<Int>
+    /// 這一輪會被移到章名之後的舊版 counter 行 → 擁有它的章節 offset（只有行首那一章）。
+    /// 所有「下一個 token」的判定都當這些行已經不在。
+    var ownedLegacyLines: [Int: Int]
 
     private static let counterRegex = try! NSRegularExpression(pattern: #"^\\setcounter\{page\}\{\s*(\d+)\s*\}$"#)
 
@@ -297,15 +338,36 @@ private struct AnchorContext {
         scan.pageMarkers.last(where: { $0.offset <= offset })?.page
     }
 
+    /// 結尾之後的下一個 token：略過空白、換行、註解，以及即將被移走的舊版 counter 行。
+    /// `stopAtMarker` 為真時，遇到 page marker 就回傳 nil（下一頁的東西不屬於這個錨點）。
+    private func nextToken(after end: Int, stopAtMarker: Bool) -> Int? {
+        var k = end
+        while k < scan.units.count {
+            if U.isWhitespace(scan.units[k]) {
+                k += 1
+            } else if scan.kinds[k] == .comment {
+                if stopAtMarker && markerOffsets.contains(k) { return nil }
+                while k < scan.units.count && scan.kinds[k] == .comment { k += 1 }
+            } else {
+                let line = scan.line(of: k)
+                guard ownedLegacyLines[line] != nil, scan.firstNonBlank(line: line) == k else { return k }
+                k = scan.lineRange(line).upperBound
+            }
+        }
+        return k
+    }
+
     func nextTokenTakesOver(after end: Int) -> Bool {
-        let next = scan.skipIgnorable(from: end)
+        guard let next = nextToken(after: end, stopAtMarker: false) else { return false }
         return next < scan.body.upperBound && takeoverOffsets.contains(next)
     }
 
-    /// 結尾之後的下一個 token（略過空白、換行與註解）是否為作用中的 `\setcounter{page}`。
+    /// 結尾之後的下一個 token（略過空白、換行與註解，但**不跨過 page marker**）是否為作用中的
+    /// `\setcounter{page}`。下一個 marker 之後的 counter 屬於後面的頁與錨點（例如下一章的舊版
+    /// counter）；若把它算成這個錨點的，第一輪會略過這個錨點、該 counter 被移走後第二輪又替它插入。
     func pageCounterFollows(_ end: Int) -> Bool {
-        let next = scan.skipIgnorable(from: end)
-        guard next < scan.body.upperBound, scan.isActive(next),
+        guard let next = nextToken(after: end, stopAtMarker: true),
+              next < scan.body.upperBound, scan.isActive(next),
               let word = scan.controlWords.first(where: { $0.start == next }), word.name == "setcounter",
               let argument = scan.readGroupArgument(from: word.end) else { return false }
         return argument.text.trimmingCharacters(in: .whitespaces) == "page"

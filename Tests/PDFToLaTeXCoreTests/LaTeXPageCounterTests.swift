@@ -371,6 +371,153 @@ final class LaTeXPageCounterTests: XCTestCase {
         XCTAssertEqual(LaTeXNormalizer.insertPageCounters(mainResult), mainResult)
     }
 
+    // MARK: - Several anchors on one line (byte-level idempotency)
+
+    func testTwoChaptersOnOneLine() {
+        let input = "\\begin{document}\n%% === Page 5 ===\n\\chapter{A}\\chapter{B}\nText.\n\\end{document}"
+        let expected = "\\begin{document}\n%% === Page 5 ===\n\\chapter{A}\n\\setcounter{page}{5}\n\\chapter{B}\n\\setcounter{page}{5}\nText.\n\\end{document}"
+        let first = LaTeXNormalizer.insertPageCounters(input)
+        XCTAssertEqual(first, expected)
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(first), first)
+    }
+
+    func testThreeChaptersOnOneLine() {
+        let input = "\\begin{document}\n%% === Page 5 ===\n\\chapter{A}\\chapter{B} \\chapter{C}\nText.\n\\end{document}"
+        let first = LaTeXNormalizer.insertPageCounters(input)
+        XCTAssertEqual(first, "\\begin{document}\n%% === Page 5 ===\n\\chapter{A}\n\\setcounter{page}{5}\n\\chapter{B}\n\\setcounter{page}{5}\n \\chapter{C}\n\\setcounter{page}{5}\nText.\n\\end{document}")
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(first), first)
+    }
+
+    func testChapterAndMainmatterOnOneLine() {
+        let chapterFirst = "\\begin{document}\n%% === Page 5 ===\n\\chapter{A}\\mainmatter\nText.\n\\end{document}"
+        let first = LaTeXNormalizer.insertPageCounters(chapterFirst)
+        XCTAssertEqual(first, "\\begin{document}\n%% === Page 5 ===\n\\chapter{A}\n\\setcounter{page}{5}\n\\mainmatter\n\\setcounter{page}{5}\nText.\n\\end{document}")
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(first), first)
+
+        let mainmatterFirst = """
+        \\begin{document}
+        %% === Page 2 ===
+        \\frontmatter
+        Preface.
+        %% === Page 9 ===
+        \\mainmatter\\chapter{A}
+        Text.
+        \\end{document}
+        """
+        let second = LaTeXNormalizer.insertPageCounters(mainmatterFirst)
+        XCTAssertEqual(second, mainmatterFirst.replacingOccurrences(
+            of: "\\mainmatter\\chapter{A}\n", with: "\\mainmatter\\chapter{A}\n\\setcounter{page}{9}\n"
+        ))
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(second), second)
+    }
+
+    /// fuzz 找到的案例（LaTeXIdempotencyFuzzTests case 332）：章節 C 之後隔著幾個 marker 的 counter
+    /// 其實是下一章 E 的舊版 counter。「已有 counter」的判定不可跨過下一個 page marker，否則第一輪把它當成
+    /// C 的、第二輪（counter 已移到 E 之後）又替 C 插入一個。
+    func testCounterOnALaterPageDoesNotCountAsTheAnchorsOwn() {
+        let input = """
+        \\begin{document}
+        %% === Page 6 ===
+        %% === Page 8 ===
+        \\setcounter{page}{8}\\chapter[S]{C} % trailing
+        %% === Page 9 ===
+        %% === Page 10 ===
+        \\setcounter{page}{10}
+        \\chapter{E}
+        \\end{document}
+        """
+        let first = LaTeXNormalizer.applyPageCounters(input)
+        XCTAssertTrue(first.result.contains("\\chapter[S]{C} % trailing\n\\setcounter{page}{8}\n"))
+        XCTAssertTrue(first.result.contains("\\chapter{E}\n\\setcounter{page}{10}\n"))
+        let second = LaTeXNormalizer.applyPageCounters(first.result)
+        XCTAssertEqual(second.result, first.result)
+        XCTAssertEqual(second.notes, [])
+    }
+
+    /// 下一個 page marker 之後的 counter 屬於那一頁，不是前面章節的：章節仍要有自己的 counter，
+    /// 否則章首頁的頁碼要等到下一頁的 counter 才被設定。
+    func testCounterAfterTheNextMarkerBelongsToThatPage() {
+        let input = """
+        \\begin{document}
+        %% === Page 7 ===
+        Intro.
+        %% === Page 8 ===
+        \\chapter{A}
+        %% === Page 9 ===
+        \\setcounter{page}{9}
+        More text.
+        \\end{document}
+        """
+        let result = LaTeXNormalizer.insertPageCounters(input)
+        XCTAssertTrue(result.contains("\\chapter{A}\n\\setcounter{page}{8}\n%% === Page 9 ===\n\\setcounter{page}{9}\nMore"))
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(result), result)
+    }
+
+    /// fuzz 找到的案例（case 3719／2043）：兩章之間隔著空行或註解行的舊版 counter 屬於下一章（會被移走），
+    /// 不能同時被上一章當成「已有的 counter」。
+    func testLegacyCounterOfTheNextChapterIsNotThePreviousChaptersCounter() {
+        for separator in ["  ", "% plain comment"] {
+            let input = """
+            \\begin{document}
+            %% === Page 3 ===
+            \\setcounter{page}{3}
+            \\chapter{E}
+            \(separator)
+             \\setcounter{page}{3}
+            \\chapter{F}
+            \\end{document}
+            """
+            let expected = """
+            \\begin{document}
+            %% === Page 3 ===
+            \\chapter{E}
+            \\setcounter{page}{3}
+            \(separator)
+            \\chapter{F}
+             \\setcounter{page}{3}
+            \\end{document}
+            """
+            let first = LaTeXNormalizer.applyPageCounters(input)
+            XCTAssertEqual(first.result, expected, separator)
+            XCTAssertEqual(first.notes.map(\.kind), [.legacyCounterMoved(page: 3), .legacyCounterMoved(page: 3)], separator)
+            let second = LaTeXNormalizer.applyPageCounters(first.result)
+            XCTAssertEqual(second.result, first.result, separator)
+            XCTAssertEqual(second.notes, [], separator)
+        }
+    }
+
+    /// fuzz 找到的案例（case 926）：同一行兩個章節共用「前一行」，舊版 counter 只屬於行首那一章；
+    /// 否則兩章各產生一組刪除＋移動，編輯重疊而弄壞原文。
+    func testLegacyCounterIsOwnedOnlyByTheFirstChapterOnTheLine() {
+        let input = "\\begin{document}\n%% === Page 5 ===\n\\setcounter{page}{5}\n\\chapter{E}\\chapter{A}\\end{document}"
+        let first = LaTeXNormalizer.applyPageCounters(input)
+        XCTAssertEqual(first.result, "\\begin{document}\n%% === Page 5 ===\n\\chapter{E}\n\\setcounter{page}{5}\n\\chapter{A}\n\\setcounter{page}{5}\n\\end{document}")
+        XCTAssertEqual(first.notes.map(\.kind), [.legacyCounterMoved(page: 5), .counterInserted(page: 5)])
+        XCTAssertEqual(LaTeXNormalizer.applyPageCounters(first.result).result, first.result)
+    }
+
+    /// comment 套件的 `\end{comment}` 必須獨佔一行：行中的 `\end{comment}` 之後的假 marker 與章節仍在註解內。
+    func testInlineEndCommentDoesNotEndTheCommentEnvironment() {
+        let input = """
+        \\begin{document}
+        %% === Page 12 ===
+        Intro.
+        \\begin{comment}
+        Example: \\end{comment}
+        %% === Page 99 ===
+        \\chapter{Fake}
+        \\end{comment}
+        \\chapter{Real}
+        Body.
+        \\end{document}
+        """
+        let result = LaTeXNormalizer.insertPageCounters(input)
+        XCTAssertTrue(result.contains("Example: \\end{comment}\n%% === Page 99 ===\n\\chapter{Fake}\n\\end{comment}\n"))
+        XCTAssertTrue(result.contains("\\chapter{Real}\n\\setcounter{page}{12}\nBody."))
+        XCTAssertFalse(result.contains("{99}"))
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(result), result)
+    }
+
     // MARK: - Marker stripping (whole lines only)
 
     func testStrippingRemovesOnlyWholeMarkerLinesAndNeverJoinsLines() {
