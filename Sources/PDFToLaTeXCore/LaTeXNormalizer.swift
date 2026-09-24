@@ -127,9 +127,11 @@ public struct LaTeXNormalizer: Sendable {
     ///
     /// 每個邊界比較前一頁的「頁尾」與下一頁的「頁首」：頁尾是邊界之前、上一個邊界之後最後
     /// `windowSize` 個可比對行；頁首是邊界之後、下一個邊界之前最前面 `windowSize` 個可比對行。
-    /// 頁尾的最後 k 行與頁首的前 k 行逐行相同（去掉頭尾空格、tab 與 CR 後比較）時，取最大的 k，
-    /// 刪除頁首那 k 行，再重新比較，直到沒有重疊。只有「連續的一段」重疊才算重複：頁首某一行只是
-    /// 在頁尾出現過（例如 `\centering`、`\end{table}`）不刪。
+    /// 頁尾的最後 k 行與頁首的前 k 行逐行相同（去掉頭尾空格、tab 與 CR 後比較），而且頁首那 k 行自身的
+    /// 結構配對完整（`LaTeXSourceScan.linesAreSelfBalanced`）時，取最大的 k，刪除頁首那 k 行，再重新
+    /// 比較，直到沒有重疊。只有「連續的一段」重疊才算重複：頁首某一行只是在頁尾出現過（例如
+    /// `\centering`、`\end{table}`）不刪。配對不完整的段落不刪：巢狀列表的內層與外層結尾都是
+    /// `\end{itemize}`，文字相同卻不是重複，刪掉外層結尾就讓列表不再關閉。
     ///
     /// 每一行屬於以下三類之一（封閉列舉）：
     /// 1. **阻隔**：碰到 verbatim 的行（`LaTeXSourceScan.lineTouchesVerbatim`：`\begin{verbatim}` 那一行、
@@ -178,6 +180,7 @@ public struct LaTeXNormalizer: Sendable {
                 }
                 let overlap = stride(from: min(tail.count, head.count), through: 1, by: -1).first { k in
                     zip(tail.suffix(k), head.prefix(k)).allSatisfy { keys[$0] == keys[$1] }
+                        && scan.linesAreSelfBalanced(Array(head.prefix(k)))
                 } ?? 0
                 guard overlap > 0 else { break }
                 removed.formUnion(head.prefix(overlap))

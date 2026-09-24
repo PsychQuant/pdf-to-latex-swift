@@ -192,6 +192,93 @@ struct LaTeXSourceScan {
         return segments
     }
 
+    /// 這些行（依序接起來看）的結構配對是否自成一體（PsychQuant/macdoc#215）。刪掉一段自成一體的行，
+    /// 不會改變文件其他地方的配對；刪掉不自成一體的行（例如只有外層列表的 `\end{itemize}`），會。
+    ///
+    /// 配對（封閉列舉，不得依性質相似類推）：大括號 `{`／`}`；同名的 `\begin{X}`／`\end{X}`；`\[`／`\]`；
+    /// `\(`／`\)`；`$` 的開與關（`$$` 視為兩個）；`\begingroup`／`\endgroup`；`\bgroup`／`\egroup`；
+    /// `\left`／`\right`；名稱以 `if` 開頭的控制字（`\iff` 除外，那是數學符號）／`\fi`。
+    ///
+    /// 只看 code（註解與 verbatim 不算；`\{`、`\}`、`\$` 是字元）。`\begin`、`\end` 的環境名稱必須在同一行
+    /// 讀得到，否則視為不自成一體。判斷錯的方向只會讓段落不被刪（例如 `\ifthenelse` 被當成條件式）。
+    func linesAreSelfBalanced(_ lines: [Int]) -> Bool {
+        enum Opener: Equatable {
+            case brace, environment(String), displayMath, inlineMath, dollar, group, bgroup, left, conditional
+        }
+        var stack: [Opener] = []
+        func close(_ opener: Opener) -> Bool {
+            guard stack.last == opener else { return false }
+            stack.removeLast()
+            return true
+        }
+        for line in lines {
+            let range = lineRange(line)
+            var k = range.lowerBound
+            while k < range.upperBound {
+                guard kinds[k] == .code else {
+                    k += 1
+                    continue
+                }
+                let unit = units[k]
+                if unit == U.backslash {
+                    guard k + 1 < range.upperBound else { break }
+                    let next = units[k + 1]
+                    guard U.isLetter(next) else {
+                        switch next {
+                        case U.openBracket: stack.append(.displayMath)
+                        case U.closeBracket: if !close(.displayMath) { return false }
+                        case U.openParen: stack.append(.inlineMath)
+                        case U.closeParen: if !close(.inlineMath) { return false }
+                        default: break
+                        }
+                        k += 2
+                        continue
+                    }
+                    var end = k + 1
+                    while end < range.upperBound && U.isLetter(units[end]) { end += 1 }
+                    let name = text((k + 1)..<end)
+                    switch name {
+                    case "begin", "end":
+                        guard let argument = readGroupArgument(from: end),
+                              argument.range.upperBound <= range.upperBound else { return false }
+                        let environment = Opener.environment(argument.text.trimmingCharacters(in: .whitespaces))
+                        if name == "begin" {
+                            stack.append(environment)
+                        } else if !close(environment) {
+                            return false
+                        }
+                        k = argument.range.upperBound
+                        continue
+                    case "begingroup": stack.append(.group)
+                    case "endgroup": if !close(.group) { return false }
+                    case "bgroup": stack.append(.bgroup)
+                    case "egroup": if !close(.bgroup) { return false }
+                    case "left": stack.append(.left)
+                    case "right": if !close(.left) { return false }
+                    case "fi": if !close(.conditional) { return false }
+                    case "iff": break
+                    default: if name.hasPrefix("if") { stack.append(.conditional) }
+                    }
+                    k = end
+                    continue
+                }
+                switch unit {
+                case U.openBrace: stack.append(.brace)
+                case U.closeBrace: if !close(.brace) { return false }
+                case U.dollar:
+                    if stack.last == .dollar {
+                        stack.removeLast()
+                    } else {
+                        stack.append(.dollar)
+                    }
+                default: break
+                }
+                k += 1
+            }
+        }
+        return stack.isEmpty
+    }
+
     /// 這一行結尾的換行是否為 verbatim（在它之後插入一行會插進 verbatim 內容）。沒有換行時為 false。
     func lineEndIsVerbatim(_ line: Int) -> Bool {
         guard line + 1 < lineStarts.count else { return false }
@@ -737,6 +824,9 @@ enum U {
     static let star: UInt16 = 0x2A
     static let equals: UInt16 = 0x3D
     static let comma: UInt16 = 0x2C
+    static let dollar: UInt16 = 0x24
+    static let openParen: UInt16 = 0x28
+    static let closeParen: UInt16 = 0x29
 
     static func isLetter(_ unit: UInt16) -> Bool {
         (unit >= 0x41 && unit <= 0x5A) || (unit >= 0x61 && unit <= 0x7A)

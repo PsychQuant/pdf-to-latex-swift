@@ -172,6 +172,53 @@ final class LaTeXPageBoundaryTests: XCTestCase {
         XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input)
     }
 
+    /// 合法的巢狀列表：內層與外層各一個 `\\end{itemize}` 夾著分頁，文字相同但不是重複（Codex R2 HIGH）。
+    /// 舊版的短文件門檻剛好擋住；刪掉外層結尾，pdflatex 實測為
+    /// `! LaTeX Error: \\begin{itemize} on input line 3 ended by \\end{document}.`
+    func testDedup_nestedListEndsAreNotDuplicates() {
+        let input = """
+        \\documentclass{article}
+        \\begin{document}
+        \\begin{itemize}
+        \\item Outer
+        \\begin{itemize}
+        \\item Inner
+        \\end{itemize}
+        %% === Page 2 ===
+        \\end{itemize}
+        \\end{document}
+        """
+        XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input)
+    }
+
+    /// 只刪「自身配對完整」的重疊段落：段落裡有未配對的結構（封閉列舉：大括號、`\\begin`／`\\end`、
+    /// `\\[`／`\\]`、`\\(`／`\\)`、`$` 的奇偶、`\\begingroup`／`\\endgroup`、`\\bgroup`／`\\egroup`、
+    /// `\\left`／`\\right`、`\\if…`／`\\fi`），刪掉它就會改變其他地方的配對，所以不刪。
+    func testDedup_onlySelfBalancedOverlapsAreDeleted() {
+        let unbalanced = [
+            "}", "\\end{center}", "\\]", "\\)", "$x = 1", "\\fi", "\\right)", "\\endgroup", "\\egroup",
+            "{\\bfseries", "\\begin{center}", "\\ifdim\\x>0pt", "\\left(", "\\[", "} {",
+        ]
+        for line in unbalanced {
+            let input = "\\begin{document}\nOpening.\n\(line)\n%% === Page 2 ===\n\(line)\nClosing.\n\\end{document}"
+            XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input, line)
+        }
+
+        // 配對完整的段落照常去重，即使裡面有環境、數學或群組。
+        let balanced = [
+            ["\\begin{center}", "Centered.", "\\end{center}"],
+            ["\\[", "x = 1", "\\]"],
+            ["Price $x$ and {\\bfseries bold}.", "\\left( y \\right)"],
+            ["\\ifdim\\x>0pt A\\else B\\fi"],
+        ]
+        for block in balanced {
+            let joined = block.joined(separator: "\n")
+            let input = "\\begin{document}\nOpening.\n\(joined)\n%% === Page 2 ===\n\(joined)\nClosing.\n\\end{document}"
+            let expected = "\\begin{document}\nOpening.\n\(joined)\n%% === Page 2 ===\nClosing.\n\\end{document}"
+            XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), expected, joined)
+        }
+    }
+
     /// 真正的重複（前一頁最後幾行在下一頁開頭又出現）照常刪除；marker 之後的空行與 `%%` 註解
     /// 不影響比對，也不會被刪。
     func testDedup_contiguousOverlapIsRemovedAndBlankLinesKept() {
@@ -246,7 +293,7 @@ final class LaTeXPageBoundaryTests: XCTestCase {
     /// 重複率高的行，加上會讓舊版誤判的 verbatim 片段（內含假 marker、`\end{itemize}`、`\item`）。
     private static let fuzzLines = [
         "Text A.", "Text B.", "Text A.", "\\centering", "\\end{table}", "\\begin{itemize}", "\\end{itemize}",
-        "\\item X", "\\item Y", "", "%% note", "% plain comment", "  Text A.  ",
+        "\\item X", "\\item Y", "", "%% note", "% plain comment", "  Text A.  ", "}", "{\\bfseries", "$x$",
         "\\begin{verbatim}\nText A.\n%% === Page 50 ===\nText A.\n\\end{verbatim}",
         "\\begin{comment}\n\\end{itemize}\n%% === Page 51 ===\n\\item Z\n\\end{comment}",
         "\\begin{Verbatim}\n\\end{itemize}\n\\end{Verbatim}",
@@ -272,7 +319,7 @@ final class LaTeXPageBoundaryTests: XCTestCase {
         return document
     }
 
-    /// 兩個步驟都不改任何 verbatim；去重冪等，且只刪 marker 以外的行。
+    /// 兩個步驟都不改任何 verbatim；去重冪等、只刪 marker 以外的行，且不改變整份文件的配對狀態。
     func testBoundaryStepsNeverTouchVerbatimAndAreIdempotent() {
         var rng = SeededGenerator(state: 0x5EED_0215)
         let normalizer = LaTeXNormalizer()
@@ -284,6 +331,14 @@ final class LaTeXPageBoundaryTests: XCTestCase {
 
             let deduped = normalizer.removeCrossPageDuplicates(source)
             XCTAssertEqual(LaTeXSourceScan(deduped).verbatimSegments, verbatim, context)
+            // 只刪自成一體的段落：整份文件的配對狀態不變。
+            let sourceScan = LaTeXSourceScan(source)
+            let dedupedScan = LaTeXSourceScan(deduped)
+            XCTAssertEqual(
+                dedupedScan.linesAreSelfBalanced(Array(dedupedScan.lineStarts.indices)),
+                sourceScan.linesAreSelfBalanced(Array(sourceScan.lineStarts.indices)),
+                context
+            )
             XCTAssertEqual(normalizer.removeCrossPageDuplicates(deduped), deduped, context)
             // 結果的各行是原文各行的子序列，且被刪的行都不是 marker。
             let kept = deduped.components(separatedBy: "\n")
