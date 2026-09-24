@@ -295,6 +295,52 @@ struct LaTeXSourceScan {
         return stack.isEmpty
     }
 
+    /// 這一行是否「像正文」（PsychQuant/macdoc#215，Codex R5 後的收窄規則）。兩個條件都要成立：
+    ///
+    /// 1. 去掉註解、verbatim、控制序列（`\name` 與 `\` 加一個字元）與空白後，至少有一個字母
+    ///    （`Character.isLetter`：拉丁字母、CJK、假名等；數字不算）；
+    /// 2. 去掉前導空格與 tab 後，不以 `{`、`[`、`}`、`]`、`&` 或 `\\` 開頭。
+    ///
+    /// 去重只刪像正文的行。理由：AI 在頁尾與頁首重複寫的是正文；純結構或純參數的行（`{1}`、`\]`、
+    /// `\hline`、`& a & b \\`）文字相同時，常常是同一個指令的不同參數、表格的不同列、不同環境的分隔字元，
+    /// 而它們是否能刪取決於前後文的巨集與參數，無法在行的層次判斷（`\frac⏎{1}⏎分頁⏎{1}` 的兩個 `{1}` 是分子
+    /// 與分母）。以 `{`／`[` 開頭的行可能是前一行指令的參數；以 `}`／`]` 開頭的行是前面群組的結尾；以 `&`、
+    /// `\\` 開頭的是表格或對齊的延續。這條規則只會讓可刪的行變少。
+    func lineLooksLikeProse(_ line: Int) -> Bool {
+        let range = lineRange(line)
+        var p = range.lowerBound
+        while p < range.upperBound && (units[p] == U.space || units[p] == U.tab) { p += 1 }
+        guard p < range.upperBound else { return false }
+        switch units[p] {
+        case U.openBrace, U.openBracket, U.closeBrace, U.closeBracket, U.ampersand:
+            return false
+        case U.backslash where p + 1 < range.upperBound && units[p + 1] == U.backslash:
+            return false
+        default:
+            break
+        }
+        var remaining: [UInt16] = []
+        var k = range.lowerBound
+        while k < range.upperBound {
+            guard kinds[k] == .code else {
+                k += 1
+                continue
+            }
+            if units[k] == U.backslash {
+                k += 1
+                if k < range.upperBound && U.isLetter(units[k]) {
+                    while k < range.upperBound && U.isLetter(units[k]) { k += 1 }
+                } else {
+                    k += 1
+                }
+                continue
+            }
+            if !U.isWhitespace(units[k]) { remaining.append(units[k]) }
+            k += 1
+        }
+        return String(decoding: remaining, as: UTF16.self).contains { $0.isLetter }
+    }
+
     /// 與條件式相關、名稱不以 `if` 開頭的控制字（封閉列舉）。見 `linesAreSelfBalanced`。
     static let conditionalWords: Set<String> = ["or", "else", "fi", "unless", "loop", "repeat"]
 
@@ -846,6 +892,7 @@ enum U {
     static let dollar: UInt16 = 0x24
     static let openParen: UInt16 = 0x28
     static let closeParen: UInt16 = 0x29
+    static let ampersand: UInt16 = 0x26
 
     static func isLetter(_ unit: UInt16) -> Bool {
         (unit >= 0x41 && unit <= 0x5A) || (unit >= 0x61 && unit <= 0x7A)

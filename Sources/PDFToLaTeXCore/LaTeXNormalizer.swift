@@ -6,8 +6,9 @@ import PDFKit
 /// 專案層級清理結果報告。
 ///
 /// `Equatable` 是自動合成的，所以 `figureWidthResolutions`、`unreadableResponseFiles`、
-/// `pageCounterNotes`（PsychQuant/macdoc#9、#10 新增）與 `chapterOpening`（#210 新增）也參與比較：
-/// 拿一份用預設值建構的報告去和 `normalizeProject` 的結果比較，只要有頁碼、圖片或 openany 紀錄就會不相等。
+/// `pageCounterNotes`（PsychQuant/macdoc#9、#10 新增）、`chapterOpening`（#210 新增）與 `splitListNotes`
+/// （#215 新增）也參與比較：拿一份用預設值建構的報告去和 `normalizeProject` 的結果比較，只要有頁碼、圖片、
+/// openany 或列表修正紀錄就會不相等。
 public struct NormalizeProjectReport: Sendable, Equatable {
     public let mainFileChanged: Bool
     public let preambleFileChanged: Bool
@@ -29,6 +30,9 @@ public struct NormalizeProjectReport: Sendable, Equatable {
     public let pageCounterNotes: [PageCounterNote]
     /// 章節從偶數頁開始時的 `openany` 處理結果（PsychQuant/macdoc#210）。
     public let chapterOpening: ChapterOpeningOutcome
+    /// 跨頁列表修正的紀錄（接回的列表、整份不修正或停止的原因；PsychQuant/macdoc#215）。
+    /// `line` 以步驟 9 的中間原始碼為準。
+    public let splitListNotes: [SplitListNote]
 
     public init(
         mainFileChanged: Bool, preambleFileChanged: Bool,
@@ -39,7 +43,8 @@ public struct NormalizeProjectReport: Sendable, Equatable {
         figureWidthResolutions: [FigureWidthResolution] = [],
         unreadableResponseFiles: [String] = [],
         pageCounterNotes: [PageCounterNote] = [],
-        chapterOpening: ChapterOpeningOutcome = .notNeeded
+        chapterOpening: ChapterOpeningOutcome = .notNeeded,
+        splitListNotes: [SplitListNote] = []
     ) {
         self.mainFileChanged = mainFileChanged
         self.preambleFileChanged = preambleFileChanged
@@ -55,6 +60,40 @@ public struct NormalizeProjectReport: Sendable, Equatable {
         self.unreadableResponseFiles = unreadableResponseFiles
         self.pageCounterNotes = pageCounterNotes
         self.chapterOpening = chapterOpening
+        self.splitListNotes = splitListNotes
+    }
+}
+
+/// 跨頁列表修正（`applySplitListFixes`）的一筆紀錄（PsychQuant/macdoc#215）。
+public struct SplitListNote: Sendable, Equatable {
+    /// 紀錄類別（封閉列舉）。
+    public enum Kind: Sendable, Equatable {
+        /// 移除了過早的 `\end{environment}`，列表接到下一頁的 `\item`（需要時在孤立 items 之後補上結尾）。
+        case listRejoined(environment: String)
+        /// 作用中的程式碼裡有無法以 `\begin`／`\end` 建模的列表指令（`\name`）：整份不修正。
+        case unmodelledListCommand(name: String)
+        /// 遇到無法配對的 `\end{…}`（或讀不到環境名稱）：之後的結構無法確定，不再找新的修正。
+        case unmatchedEnvironmentEnd
+    }
+
+    /// 在輸入原始碼中的行號（1 起算）：被移除的 `\end` 那一行、指令所在行、無法配對的 `\end` 所在行。
+    public let line: Int
+    public let kind: Kind
+
+    public init(line: Int, kind: Kind) {
+        self.line = line
+        self.kind = kind
+    }
+}
+
+/// `applySplitListFixes` 的結果。
+public struct SplitListReport: Sendable, Equatable {
+    public let result: String
+    public let notes: [SplitListNote]
+
+    public init(result: String, notes: [SplitListNote]) {
+        self.result = result
+        self.notes = notes
     }
 }
 
@@ -127,11 +166,20 @@ public struct LaTeXNormalizer: Sendable {
     ///
     /// 每個邊界比較前一頁的「頁尾」與下一頁的「頁首」：頁尾是邊界之前、上一個邊界之後最後
     /// `windowSize` 個可比對行；頁首是邊界之後、下一個邊界之前最前面 `windowSize` 個可比對行。
-    /// 頁尾的最後 k 行與頁首的前 k 行逐行相同（去掉頭尾空格、tab 與 CR 後比較），而且頁首那 k 行自身的
-    /// 結構配對完整（`LaTeXSourceScan.linesAreSelfBalanced`）時，取最大的 k，刪除頁首那 k 行，再重新
-    /// 比較，直到沒有重疊。只有「連續的一段」重疊才算重複：頁首某一行只是在頁尾出現過（例如
-    /// `\centering`、`\end{table}`）不刪。配對不完整的段落不刪：巢狀列表的內層與外層結尾都是
-    /// `\end{itemize}`，文字相同卻不是重複，刪掉外層結尾就讓列表不再關閉。
+    /// 頁尾的最後 k 行與頁首的前 k 行逐行相同（去掉頭尾空格、tab 與 CR 後比較），而且頁首那 k 行同時符合
+    /// 以下兩個條件時，取最大的 k，刪除頁首那 k 行，再重新比較，直到沒有重疊：
+    ///
+    /// - **每一行都像正文**（`LaTeXSourceScan.lineLooksLikeProse`：去掉控制序列、註解與空白後有字母或 CJK
+    ///   字元，且不以 `{ [ } ] &` 或 `\\` 開頭）；
+    /// - **整段結構配對完整、不含條件式**（`LaTeXSourceScan.linesAreSelfBalanced`）。
+    ///
+    /// 只有「連續的一段」重疊才算重複：頁首某一行只是在頁尾出現過（例如 `\centering`、`\end{table}`）不刪。
+    ///
+    /// 為什麼這麼保守：去重是啟發式，AI 在頁尾與頁首重複寫的是正文，而文字相同的結構行常常是不同的東西 ——
+    /// 巢狀列表的內層與外層結尾都是 `\end{itemize}`、`\frac` 的分子與分母都是 `{1}`、`\ifcase` 的兩個分支
+    /// 分隔都是 `\or`、兩段展示數學的結尾與開頭都是 `$$`。這些行能不能刪取決於前後文，行的層次判斷不了
+    /// （Codex R2～R5 逐一找到的反例）。所以不再逐案補洞，而是把可刪的範圍收窄到像正文、配對完整的段落：
+    /// 這兩個條件只會減少刪除，代價是結構行的真重複留著（可以編譯，頂多多一行）。
     ///
     /// 每一行屬於以下三類之一（封閉列舉）：
     /// 1. **阻隔**：碰到 verbatim 的行（`LaTeXSourceScan.lineTouchesVerbatim`：`\begin{verbatim}` 那一行、
@@ -180,6 +228,7 @@ public struct LaTeXNormalizer: Sendable {
                 }
                 let overlap = stride(from: min(tail.count, head.count), through: 1, by: -1).first { k in
                     zip(tail.suffix(k), head.prefix(k)).allSatisfy { keys[$0] == keys[$1] }
+                        && head.prefix(k).allSatisfy { scan.lineLooksLikeProse($0) }
                         && scan.linesAreSelfBalanced(Array(head.prefix(k)))
                 } ?? 0
                 guard overlap > 0 else { break }
@@ -460,7 +509,8 @@ public struct LaTeXNormalizer: Sendable {
         mainSource = Self.fixTagInAligned(mainSource)
 
         // 9. 修正跨頁列表環境拆分
-        mainSource = Self.fixSplitListEnvironments(mainSource)
+        let splitList = Self.applySplitListFixes(mainSource)
+        mainSource = splitList.result
 
         // 10. 修正被誤逃脫的數學模式 $
         let (unescapedMain, unescapeCount) = Self.fixMisescapedMathDollars(mainSource)
@@ -536,7 +586,8 @@ public struct LaTeXNormalizer: Sendable {
             figureWidthResolutions: figureWidths.resolutions,
             unreadableResponseFiles: figureWidths.unreadableResponseFiles,
             pageCounterNotes: pageCounters.notes,
-            chapterOpening: chapterOpening
+            chapterOpening: chapterOpening,
+            splitListNotes: splitList.notes
         )
     }
 
@@ -1292,6 +1343,22 @@ public struct LaTeXNormalizer: Sendable {
 
     // MARK: - Split List Environment Fix
 
+    /// 相容 API：回傳 `applySplitListFixes(_:)` 的改寫結果。
+    public static func fixSplitListEnvironments(_ source: String) -> String {
+        applySplitListFixes(source).result
+    }
+
+    /// 無法以 `\begin`／`\end` 建模的列表指令（封閉列舉，不得依性質相似類推）：直接開關 LaTeX 列表的
+    /// `\list`、`\trivlist`，以及以指令形式使用、內部會開關列表的環境（`\itemize`、`\enumerate`、
+    /// `\description`；以 trivlist 實作的 `\center`、`\flushleft`、`\flushright`；以 list 實作的
+    /// `\quote`、`\quotation`、`\verse`），各含 `\end…` 形式。它們開的列表不在環境堆疊裡，堆疊判斷
+    /// 「沒有列表還開著」就不成立（Codex R5：`\list{--}{}` … `\endlist` 裡的 `\item`）。
+    static let unmodelledListCommands: Set<String> = {
+        let names = ["list", "trivlist", "itemize", "enumerate", "description", "center", "flushleft",
+                     "flushright", "quote", "quotation", "verse"]
+        return Set(names + names.map { "end" + $0 })
+    }()
+
     /// 修正跨頁時列表環境被過早關閉的問題：AI 逐頁轉寫時，前一頁結尾關閉了列表，下一頁開頭的 `\item`
     /// 就成了孤立的 item（LaTeX 報 `Lonely \item`）。移除過早的 `\end{…}`，並在孤立 items 之後補上結尾
     /// （後面已有結尾時沿用）。
@@ -1314,10 +1381,23 @@ public struct LaTeXNormalizer: Sendable {
     ///    item 之後補上一行。補上的位置若是 verbatim 內容（例如該行以 `\verb` 結尾），這一處整個不修正。
     ///
     /// 空行與 marker 行都必須不碰到 verbatim。遇到無法配對的 `\end{…}`（或讀不到環境名稱）時，之後的結構
-    /// 無法確定，不再找新的修正。verbatim 類環境與 `\verb` 裡長得像 marker、`\end{…}`、`\item` 的文字都不算。
-    /// 編輯後 verbatim 內容有任何變化就整份不動（安全網）。
-    public static func fixSplitListEnvironments(_ source: String) -> String {
+    /// 無法確定，不再找新的修正（回報 `unmatchedEnvironmentEnd`）。verbatim 類環境與 `\verb` 裡長得像
+    /// marker、`\end{…}`、`\item` 的文字都不算。編輯後 verbatim 內容有任何變化就整份不動（安全網）。
+    ///
+    /// ## 整份不修正（Codex R5）
+    ///
+    /// 作用中的程式碼裡只要出現 `unmodelledListCommands` 的任一個，就不做任何修正，回報第一個出現的位置
+    /// （`unmodelledListCommand`）。巨集定義裡的不算（定義處不執行）；但巨集不展開，以其他名稱包裝的
+    /// 列表指令認不出來。
+    public static func applySplitListFixes(_ source: String) -> SplitListReport {
         let scan = LaTeXSourceScan(source)
+        if let word = scan.controlWords.first(where: {
+            unmodelledListCommands.contains($0.name) && scan.isActive($0.start)
+        }) {
+            return SplitListReport(result: source, notes: [
+                SplitListNote(line: scan.line(of: word.start) + 1, kind: .unmodelledListCommand(name: word.name)),
+            ])
+        }
         // scan 的行與以 LF 切開的行一一對應。
         let lines = source.components(separatedBy: "\n")
         let markerLines = Set(scan.markerLines)
@@ -1363,18 +1443,25 @@ public struct LaTeXNormalizer: Sendable {
             let insertEndAfterLine: Int?
         }
         var fixes: [SplitFix] = []
+        var notes: [SplitListNote] = []
         var stack: [String] = []
         var index = 0
 
         eventLoop: while index < events.count {
             let event = events[index]
-            guard let name = event.name else { break }
+            guard let name = event.name else {
+                notes.append(SplitListNote(line: event.line + 1, kind: .unmatchedEnvironmentEnd))
+                break
+            }
             if event.isBegin {
                 stack.append(name)
                 index += 1
                 continue
             }
-            guard stack.last == name else { break }  // 無法配對：之後的結構無法確定
+            guard stack.last == name else {  // 無法配對：之後的結構無法確定
+                notes.append(SplitListNote(line: event.line + 1, kind: .unmatchedEnvironmentEnd))
+                break
+            }
 
             // 條件 1：整行的過早結尾，關閉後沒有任何環境還開著。
             let i = event.line
@@ -1409,7 +1496,10 @@ public struct LaTeXNormalizer: Sendable {
             var runBalanced = true
             while runEnd < events.count && events[runEnd].line <= lastItemLine {
                 let inner = events[runEnd]
-                guard let innerName = inner.name else { break eventLoop }
+                guard let innerName = inner.name else {
+                    notes.append(SplitListNote(line: inner.line + 1, kind: .unmatchedEnvironmentEnd))
+                    break eventLoop
+                }
                 if inner.isBegin {
                     runStack.append(innerName)
                 } else if runStack.last == innerName {
@@ -1439,6 +1529,7 @@ public struct LaTeXNormalizer: Sendable {
             fixes.append(SplitFix(
                 removeEndLine: i, envType: name, insertEndAfterLine: hasClosingEnd ? nil : lastItemLine
             ))
+            notes.append(SplitListNote(line: i + 1, kind: .listRejoined(environment: name)))
             // 模擬修正後的文件：列表繼續開著；孤立 items 的環境已配對完整；補上的結尾在它們之後關閉列表。
             index = runEnd
             if !hasClosingEnd {
@@ -1446,7 +1537,7 @@ public struct LaTeXNormalizer: Sendable {
             }
         }
 
-        guard !fixes.isEmpty else { return source }
+        guard !fixes.isEmpty else { return SplitListReport(result: source, notes: notes) }
 
         // 套用修正（從後往前以免索引偏移）。補上的行沿用檔案的換行。
         let crlf = scan.lineEnding == "\r\n"
@@ -1466,9 +1557,11 @@ public struct LaTeXNormalizer: Sendable {
         }
 
         let result = resultLines.joined(separator: "\n")
-        // 安全網：與 removeCrossPageDuplicates 相同，verbatim 有任何變化就整份不動。
-        guard LaTeXSourceScan(result).verbatimSegments == scan.verbatimSegments else { return source }
-        return result
+        // 安全網：與 removeCrossPageDuplicates 相同，verbatim 有任何變化就整份不動（修正紀錄一併捨棄）。
+        guard LaTeXSourceScan(result).verbatimSegments == scan.verbatimSegments else {
+            return SplitListReport(result: source, notes: notes.filter { $0.kind == .unmatchedEnvironmentEnd })
+        }
+        return SplitListReport(result: result, notes: notes)
     }
 
     // MARK: - End Document

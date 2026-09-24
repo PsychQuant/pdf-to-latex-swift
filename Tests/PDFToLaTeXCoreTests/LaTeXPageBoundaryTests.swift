@@ -224,7 +224,23 @@ final class LaTeXPageBoundaryTests: XCTestCase {
             XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input, line)
         }
 
-        // 配對完整的段落照常去重，即使裡面有環境、數學或群組。
+        // 配對完整、而且每一行都像正文的段落照常去重，即使裡面有環境、數學或群組。
+        let balanced = [
+            ["\\begin{center}", "Centered.", "\\end{center}"],
+            ["Price $x$ and {\\bfseries bold}.", "\\left( y \\right)"],
+            ["$a$$b$ and $$c$$"],
+        ]
+        for block in balanced {
+            let joined = block.joined(separator: "\n")
+            let input = "\\begin{document}\nOpening.\n\(joined)\n%% === Page 2 ===\n\(joined)\nClosing.\n\\end{document}"
+            let expected = "\\begin{document}\nOpening.\n\(joined)\n%% === Page 2 ===\nClosing.\n\\end{document}"
+            XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), expected, joined)
+        }
+    }
+
+    /// 配對檢查本身（不經去重）：這些段落自成一體。其中 `\[ … \]` 與 `$$ … $$` 的分隔字元行不像正文，
+    /// 所以去重時整段保留（見 `testDedup_onlyProseLikeLinesAreDeleted`）。
+    func testLinesAreSelfBalanced_pairings() {
         let balanced = [
             ["\\begin{center}", "Centered.", "\\end{center}"],
             ["\\[", "x = 1", "\\]"],
@@ -233,10 +249,43 @@ final class LaTeXPageBoundaryTests: XCTestCase {
             ["$a$$b$ and $$c$$"],
         ]
         for block in balanced {
+            let scan = LaTeXSourceScan(block.joined(separator: "\n"))
+            XCTAssertTrue(scan.linesAreSelfBalanced(Array(block.indices)), block.joined(separator: " / "))
+        }
+    }
+
+    /// `\frac` 的分子與分母夾著分頁（Codex R5 HIGH）：兩個 `{1}` 文字相同、配對也完整，卻是同一個指令的
+    /// 兩個參數。刪掉第二個，`\frac` 會拿 `\]` 當分母。只刪「像正文」的行，`{1}` 因此保留。
+    func testDedup_fracArgumentsAcrossPagesAreKept() {
+        let input = "\\documentclass{article}\n\\begin{document}\n\\[\n\\frac\n{1}\n%% === Page 2 ===\n{1}\n\\]\n\\end{document}"
+        let normalizer = LaTeXNormalizer()
+        let result = normalizer.removeCrossPageDuplicates(input)
+        XCTAssertEqual(result, input)
+        XCTAssertEqual(normalizer.removeCrossPageDuplicates(result), result)
+    }
+
+    /// 可刪的行必須像正文（Codex R5 後的收窄規則）：去掉控制序列、註解與空白後至少有一個字母或 CJK
+    /// 字元，且去掉前導空白後不以 `{`、`[`、`}`、`]`、`&`、`\\` 開頭。段落裡任何一行不符，整段不刪。
+    func testDedup_onlyProseLikeLinesAreDeleted() {
+        let structural = [
+            "{1}", "{x}", "[a]", "}", "]", "\\hline", "\\centering", "\\newpage", "\\\\", "\\\\[2pt]",
+            "& x & y \\\\", "123", "42 + 17", "% plain comment", "\\verb|x|",
+        ]
+        for line in structural {
+            let input = "\\begin{document}\nOpening.\n\(line)\n%% === Page 2 ===\n\(line)\nClosing.\n\\end{document}"
+            XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input, line)
+        }
+        // 多行段落裡只要有一行不像正文（這裡是 \[ 與 \]、$$），整段都不刪。
+        for block in [["\\[", "x = 1", "\\]"], ["$$", "x = 1", "$$"], ["Some text.", "{1}"]] {
             let joined = block.joined(separator: "\n")
             let input = "\\begin{document}\nOpening.\n\(joined)\n%% === Page 2 ===\n\(joined)\nClosing.\n\\end{document}"
-            let expected = "\\begin{document}\nOpening.\n\(joined)\n%% === Page 2 ===\nClosing.\n\\end{document}"
-            XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), expected, joined)
+            XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input, joined)
+        }
+        // 像正文的行：字母、CJK、以控制字開頭但後面有文字的行。
+        for line in ["Line B.", "資料如下。", "  x = 1", "\\item Second point", "\\textbf{Bold} text", "かな"] {
+            let input = "\\begin{document}\nOpening.\n\(line)\n%% === Page 2 ===\n\(line)\nClosing.\n\\end{document}"
+            let expected = "\\begin{document}\nOpening.\n\(line)\n%% === Page 2 ===\nClosing.\n\\end{document}"
+            XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), expected, line)
         }
     }
 
@@ -323,6 +372,9 @@ final class LaTeXPageBoundaryTests: XCTestCase {
         "\\or", "\\else", "\\fi", "\\ifcase1 A", "\\or B",
         "\\begin{itemize}\n\\item Outer\n\\begin{itemize}\n\\item Inner\n\\end{itemize}",
         "\\begin{enumerate}\n\\item E\n\\end{enumerate}", "\\begin{center}", "\\end{center}",
+        // \frac 跨頁（R5）與其他純結構、純參數的行；直接的列表指令（R5）。
+        "\\[\n\\frac\n{1}\n%% === Page 60 ===\n{1}\n\\]", "\\frac", "{1}", "\\hline", "\\\\", "& a & b \\\\",
+        "\\list{--}{}\n\\item L", "\\endlist",
     ]
 
     private func makeDocument(_ rng: inout SeededGenerator) -> String {
@@ -377,11 +429,12 @@ final class LaTeXPageBoundaryTests: XCTestCase {
                              "\(context)\n刪掉了 marker 行 \(line.debugDescription)")
             }
             XCTAssertEqual(cursor, kept.endIndex, "\(context)\n去重後出現原本沒有的行")
-            // 被刪的行都不含條件式相關控制字（不經 scanner 的判準）。
+            // 被刪的行都不含條件式相關控制字、而且像正文（不經 scanner 的判準）。
             let deleted = Self.deletedLines(source: source, result: deduped)
             for line in deleted {
                 XCTAssertNil(Self.conditionalWord.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
                              "\(context)\n刪掉了條件式行 \(line.debugDescription)")
+                XCTAssertTrue(Self.looksLikeProse(line), "\(context)\n刪掉了不像正文的行 \(line.debugDescription)")
             }
 
             let fixed = LaTeXNormalizer.fixSplitListEnvironments(source)
@@ -391,7 +444,28 @@ final class LaTeXPageBoundaryTests: XCTestCase {
             if Self.listStructureIsWellFormed(source) {
                 XCTAssertEqual(fixed, source, context)
             }
+            // 有直接的列表指令時整份不修正。
+            if Self.directListWord.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)) != nil {
+                XCTAssertEqual(fixed, source, context)
+            }
         }
+    }
+
+    private static let directListWord = try! NSRegularExpression(
+        pattern: #"\\(end)?(list|trivlist|itemize|enumerate|description)(?![A-Za-z])"#
+    )
+
+    /// 不經 scanner 的「像正文」判準：去掉 `%` 之後的註解、控制序列與空白後有字母，且不以
+    /// `{ [ } ] &` 或 `\\` 開頭（fuzz 片段裡的 `%` 都是註解起點）。
+    private static func looksLikeProse(_ line: String) -> Bool {
+        let body = line.replacingOccurrences(of: "\r", with: "")
+        let leading = body.drop { $0 == " " || $0 == "\t" }
+        if let first = leading.first, "{[}]&".contains(first) { return false }
+        if leading.hasPrefix("\\\\") { return false }
+        var text = body
+        if let percent = text.firstIndex(of: "%") { text = String(text[..<percent]) }
+        text = text.replacingOccurrences(of: #"\\([A-Za-z]+|.)"#, with: "", options: .regularExpression)
+        return text.contains { $0.isLetter }
     }
 
     private static let conditionalWord = try! NSRegularExpression(
@@ -615,7 +689,7 @@ final class LaTeXPageBoundaryTests: XCTestCase {
                     t > 0 && list.items[t].markerBefore && list.items[t...].allSatisfy { $0.nested == nil }
                 }
             }.randomElement(using: &rng)
-            let kind = Int.random(in: 0..<4, using: &rng)  // 0 原文、1 一處、2 兩處或掉結尾、3 巢狀
+            let kind = Int.random(in: 0..<5, using: &rng)  // 0 原文、1 一處、2 兩處或掉結尾、3 巢狀、4 包在 \list 裡
 
             func render(corrupt: Bool) -> String {
                 var lines = ["\\documentclass{article}", "\\begin{document}"]
@@ -627,7 +701,7 @@ final class LaTeXPageBoundaryTests: XCTestCase {
                     }
                     var split: Set<Int> = []
                     var dropClosing = false
-                    if corrupt && b == target && (kind == 1 || kind == 2) {
+                    if corrupt && b == target && (kind == 1 || kind == 2 || kind == 4) {
                         let points = list.items.indices.filter { t in
                             t > 0 && list.items[t].markerBefore && list.items[t...].allSatisfy { $0.nested == nil }
                         }
@@ -642,6 +716,10 @@ final class LaTeXPageBoundaryTests: XCTestCase {
                     }
                     lines += listLines(env: list.env, items: list.items, splitBefore: split,
                                        nestedSplit: &nestedSplit, dropClosing: dropClosing)
+                }
+                if kind == 4 {
+                    lines.insert("\\list{--}{}\n\\item Wrapper", at: 2)
+                    lines.append("\\endlist")
                 }
                 lines.append("\\end{document}")
                 var page = 0
@@ -670,13 +748,16 @@ final class LaTeXPageBoundaryTests: XCTestCase {
             case 1, 2 where target != nil:
                 XCTAssertEqual(fixed, source, context)
                 if damaged != source { repaired += 1 }
+            case 4:
+                XCTAssertEqual(fixed, damaged, context)
             default:
                 if Self.lonelyItemCount(damaged) == 0 {
                     XCTAssertEqual(fixed, damaged, context)
                 }
             }
         }
-        XCTAssertGreaterThan(repaired, 500)
+        // 覆蓋率下限：五種 kind 裡兩種（1、2）會實際修回原文，3000 例約有 480 例。
+        XCTAssertGreaterThan(repaired, 400)
     }
 
     // MARK: - fixSplitListEnvironments：巢狀與外層環境（Codex R4 HIGH）
@@ -811,6 +892,44 @@ final class LaTeXPageBoundaryTests: XCTestCase {
         \\end{document}
         """
         XCTAssertEqual(LaTeXNormalizer.fixSplitListEnvironments(input), input)
+    }
+
+    /// 直接用 `\list` 開的外層列表（Codex R5 既存問題）：它不在 `\begin`／`\end` 堆疊裡，`\item Outer two`
+    /// 其實屬於它。作用中程式碼只要出現無法建模的列表指令，就整份不修正，並回報原因。
+    func testSplitList_directListCommandBlocksAllFixes() {
+        let input = """
+        \\documentclass{article}
+        \\begin{document}
+        \\list{--}{}
+        \\item Outer one
+        \\begin{enumerate}
+        \\item Inner
+        \\end{enumerate}
+        %% === Page 2 ===
+        \\item Outer two
+        \\endlist
+        \\end{document}
+        """
+        let report = LaTeXNormalizer.applySplitListFixes(input)
+        XCTAssertEqual(report.result, input)
+        XCTAssertEqual(report.notes, [SplitListNote(line: 3, kind: .unmodelledListCommand(name: "list"))])
+        XCTAssertEqual(LaTeXNormalizer.fixSplitListEnvironments(report.result), input)
+    }
+
+    /// 同一份文件裡另有真正的頂層分頁也不修（無法建模的指令讓整份的結構都不確定）；定義裡的 `\list`
+    /// 不是作用中的程式碼，不阻擋。
+    func testSplitList_unmodelledCommandsAnywhereBlockButDefinitionsDoNot() {
+        let split = "\\begin{itemize}\n\\item A\n\\end{itemize}\n%% === Page 2 ===\n\\item B\n\\end{itemize}\n"
+        for command in ["\\trivlist\\item[] X\\endtrivlist", "\\itemize\\item X\\enditemize", "\\center X\\endcenter"] {
+            let input = "\\begin{document}\n" + split + command + "\n\\end{document}"
+            let report = LaTeXNormalizer.applySplitListFixes(input)
+            XCTAssertEqual(report.result, input, command)
+            XCTAssertEqual(report.notes.count, 1, command)
+        }
+        let defined = "\\begin{document}\n\\newcommand{\\dashlist}{\\list{--}{}}\n" + split + "\\end{document}"
+        let report = LaTeXNormalizer.applySplitListFixes(defined)
+        XCTAssertNotEqual(report.result, defined)
+        XCTAssertEqual(report.notes, [SplitListNote(line: 5, kind: .listRejoined(environment: "itemize"))])
     }
 
     /// CRLF 檔案同樣修正，補上的結尾用 CRLF。
