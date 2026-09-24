@@ -215,13 +215,15 @@ public struct AIConfig: Codable, Sendable, Equatable {
     /// ## 邊界（Codex R1 審查提出，記錄下來但刻意不擴充程式碼修）
     ///
     /// `ocrDefaultBackend`（舊欄位）與 `ocrDefaultBackendOverride`（新欄位）都是 `public var`，
-    /// 沒有任何機制阻止呼叫端繞過本方法直接賦值——例如 `config.ocrDefaultBackend = "mlx"` 或用
-    /// 帶 `ocrDefaultBackendOverride:` 參數的 `init(...)` 直接建構，都可能讓兩個欄位不同步。這不是
-    /// 這次修的漏洞：`AIConfig` 全部欄位本來就是任意賦值的 plain 設定資料，沒有任何跨欄位不變量
-    /// 由型別本身保證（`ocrDefaultHost` 與 `ocrHosts` 之間也一樣）。`ocrDefaultBackendOverride`
-    /// 這個欄位精確的保證只到「有沒有經過 `setOCRDefaultBackend` 呼叫」，不是「使用者的『真實』意圖
-    /// 一定被記錄」——**macdoc 的 `config ocr set-backend` 必須改叫這個方法，不能再直接賦值舊欄位**
-    /// （見協調者整合須知），否則新欄位仍然是 nil，整個修法沒有意義。
+    /// 沒有任何機制阻止呼叫端繞過本方法直接賦值——例如 `config.ocrDefaultBackend = "mlx"`、用帶
+    /// `ocrDefaultBackendOverride:` 參數的 `init(...)` 直接建構、或呼叫過本方法之後又直接把
+    /// `ocrDefaultBackendOverride` 清成 nil，都可能讓兩個欄位不同步。這不是這次修的漏洞：
+    /// `AIConfig` 全部欄位本來就是任意賦值的 plain 設定資料，沒有任何跨欄位不變量由型別本身保證
+    /// （`ocrDefaultHost` 與 `ocrHosts` 之間也一樣）。**新舊兩個欄位同步這件事，只在「透過本方法
+    /// 寫入」這條路徑上成立**——不是「呼叫過本方法」這個歷史事實被記錄下來、也不是型別強制的
+    /// 不變量，繞過本方法的任何寫入方式都不保證同步（Codex R3 審查：措辭修正）。**macdoc 的
+    /// `config ocr set-backend` 必須改叫這個方法，不能再直接賦值舊欄位**（見協調者整合須知），
+    /// 否則新欄位仍然是 nil，整個修法沒有意義。
     public mutating func setOCRDefaultBackend(_ backend: String) {
         ocrDefaultBackendOverride = backend
         ocrDefaultBackend = backend
