@@ -216,4 +216,119 @@ final class FigureCropMigrationTests: XCTestCase {
         XCTAssertTrue(crop4.color.r > 200 && crop4.color.b < 50, "第 4 頁要拿到自己的紅色: \(crop4.color)")
         XCTAssertTrue(crop5.color.b > 200 && crop5.color.r < 50, "第 5 頁要拿到自己的藍色: \(crop5.color)")
     }
+
+    // MARK: - Codex R1 回歸：只遷移子集不能刪掉 accumulated.tex 裡的其他頁面
+
+    /// 專案有第 3-6 頁，只要求遷移第 5 頁：accumulated.tex 重建後要包含全部四頁的內容，
+    /// 不能只剩被要求遷移的那一頁。
+    func testPartialMigrationPreservesOtherPagesInAccumulated() throws {
+        try writePageTex(page: 3, content: "Page three body.")
+        try writePageTex(page: 4, content: "Page four body.")
+        let image5 = try writePageImage(page: 5, color: Self.red)
+        try writePageTex(page: 5, content: "\\includegraphics{figures/fig1.png}")
+        try writePageTex(page: 6, content: "Page six body.")
+        try writeResponses([PageResult(
+            page: 5, latex: "", figures: [FigureRegion(id: "fig1", bbox: [0.1, 0.1, 0.4, 0.3], caption: nil)],
+            confidence: nil, notes: nil
+        )])
+        let project = makeProject(pages: [
+            PageRecord(number: 5, width: 612, height: 792, rotation: 0, renderedImagePath: image5, renderedDPI: nil),
+        ])
+
+        let outcomes = try PageTranscriber().migrateFigureCrops(project: project, pageNumbers: [5])
+        XCTAssertEqual(outcomes.count, 1, "只要求遷移第 5 頁，回報也只該有第 5 頁一筆")
+        guard case .migrated = outcomes[0].kind else { return XCTFail("第 5 頁應該被改寫: \(outcomes[0].kind)") }
+
+        let accumulated = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertTrue(accumulated.contains("Page three body."), "第 3 頁不見了:\n\(accumulated)")
+        XCTAssertTrue(accumulated.contains("Page four body."), "第 4 頁不見了:\n\(accumulated)")
+        XCTAssertTrue(accumulated.contains("figures/p005-fig1.png"), "第 5 頁沒改寫成新格式:\n\(accumulated)")
+        XCTAssertTrue(accumulated.contains("Page six body."), "第 6 頁不見了:\n\(accumulated)")
+    }
+
+    /// 第一次呼叫的 accumulated.tex 是「壞的／過時的」（模擬上次寫入失敗留下的殘檔）：即使這次
+    /// 每一頁都已經是新格式（全部落在 .unchanged），重跑仍要把 accumulated.tex 修正回正確內容，
+    /// 不能因為沒有任何一頁被改寫就跳過重建。
+    func testAccumulatedIsRepairedOnRerunEvenWhenNoPageChanges() throws {
+        let image = try writePageImage(page: 5, color: Self.red)
+        try writePageTex(page: 5, content: "\\includegraphics{figures/fig1.png}")
+        try writeResponses([PageResult(
+            page: 5, latex: "", figures: [FigureRegion(id: "fig1", bbox: [0.1, 0.1, 0.4, 0.3], caption: nil)],
+            confidence: nil, notes: nil
+        )])
+        let project = makeProject(pages: [
+            PageRecord(number: 5, width: 612, height: 792, rotation: 0, renderedImagePath: image, renderedDPI: nil),
+        ])
+        let transcriber = PageTranscriber()
+
+        _ = try transcriber.migrateFigureCrops(project: project, pageNumbers: [5])
+        let correctAccumulated = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+
+        // 模擬上一次 accumulated.tex 寫入失敗留下的殘檔（或被其他東西弄壞）。
+        try "STALE GARBAGE".write(
+            to: projectDir.appendingPathComponent("accumulated.tex"), atomically: true, encoding: .utf8
+        )
+
+        let second = try transcriber.migrateFigureCrops(project: project, pageNumbers: [5])
+        XCTAssertEqual(second, [FigureMigrationOutcome(page: 5, kind: .unchanged)], "第二輪每一頁都不該再改動")
+
+        let repaired = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertEqual(repaired, correctAccumulated, "即使沒有頁面被改寫，accumulated.tex 也要被修回正確內容")
+        XCTAssertNotEqual(repaired, "STALE GARBAGE")
+    }
+
+    // MARK: - Codex R1 回歸：.unchanged 底下的失敗細節要透過 notes 看得到
+
+    /// id 不安全（含空白）：不裁切、不改寫，但 notes 要說明原因，不能悄悄地什麼都不做。
+    func testUnsafeFigureIdIsUnchangedButNotesExplainWhy() throws {
+        let image = try writePageImage(page: 7, color: Self.blue)
+        try writePageTex(page: 7, content: "\\includegraphics{figures/bad id.png}")
+        try writeResponses([PageResult(
+            page: 7, latex: "", figures: [FigureRegion(id: "bad id", bbox: [0.1, 0.1, 0.2, 0.2], caption: nil)],
+            confidence: nil, notes: nil
+        )])
+        let project = makeProject(pages: [
+            PageRecord(number: 7, width: 612, height: 792, rotation: 0, renderedImagePath: image, renderedDPI: nil),
+        ])
+
+        let outcomes = try PageTranscriber().migrateFigureCrops(project: project, pageNumbers: [7])
+        XCTAssertEqual(outcomes[0].kind, .unchanged)
+        XCTAssertTrue(
+            outcomes[0].notes.contains { $0.contains("不是安全的檔名") },
+            "notes 應該解釋為什麼沒有裁切: \(outcomes[0].notes)"
+        )
+    }
+
+    /// 已經遷移過的裁切檔被刪掉（例如使用者手動清過 figures/）：重跑要自動補回來，即使 tex 內容
+    /// 沒有變動（outcome 仍是 .unchanged，但檔案要存在）。
+    func testMigrationRecreatesDeletedCropFile() throws {
+        let image = try writePageImage(page: 5, color: Self.red)
+        try writePageTex(page: 5, content: "\\includegraphics{figures/fig1.png}")
+        try writeResponses([PageResult(
+            page: 5, latex: "", figures: [FigureRegion(id: "fig1", bbox: [0.1, 0.1, 0.4, 0.3], caption: nil)],
+            confidence: nil, notes: nil
+        )])
+        let project = makeProject(pages: [
+            PageRecord(number: 5, width: 612, height: 792, rotation: 0, renderedImagePath: image, renderedDPI: nil),
+        ])
+        let transcriber = PageTranscriber()
+        _ = try transcriber.migrateFigureCrops(project: project, pageNumbers: [5])
+
+        let croppedURL = projectDir.appendingPathComponent("figures/p005-fig1.png")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: croppedURL.path))
+        try FileManager.default.removeItem(at: croppedURL)
+
+        let second = try transcriber.migrateFigureCrops(project: project, pageNumbers: [5])
+        XCTAssertEqual(second[0].kind, .unchanged, "tex 內容不會再變（引用早就指向這個檔名）")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: croppedURL.path),
+            "裁切檔被刪掉後重跑應該自動補回來"
+        )
+    }
 }
