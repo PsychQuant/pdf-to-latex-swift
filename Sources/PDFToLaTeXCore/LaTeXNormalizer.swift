@@ -15,13 +15,20 @@ public struct NormalizeProjectReport: Sendable, Equatable {
     public let fontPackageFixed: Bool
     public let fontSizeFixed: Bool
     public let marginsFixed: Bool
+    /// 每個 `\includegraphics{figures/...}` 的寬度還原結果（含未改寫的原因）。
+    /// `line` 以步驟 14 的中間原始碼為準；定位請以 `path` + `page` 為主。
+    public let figureWidthResolutions: [FigureWidthResolution]
+    /// 讀不到或無法解碼的 `responses/*.json`（相對於專案目錄）。
+    public let unreadableResponseFiles: [String]
 
     public init(
         mainFileChanged: Bool, preambleFileChanged: Bool,
         preambleURL: URL?, documentClassFixed: Bool,
         mathOperatorsAdded: [String], currencyDollarsEscaped: Int,
         paperSizeFixed: Bool = false, fontPackageFixed: Bool = false,
-        fontSizeFixed: Bool = false, marginsFixed: Bool = false
+        fontSizeFixed: Bool = false, marginsFixed: Bool = false,
+        figureWidthResolutions: [FigureWidthResolution] = [],
+        unreadableResponseFiles: [String] = []
     ) {
         self.mainFileChanged = mainFileChanged
         self.preambleFileChanged = preambleFileChanged
@@ -33,6 +40,8 @@ public struct NormalizeProjectReport: Sendable, Equatable {
         self.fontPackageFixed = fontPackageFixed
         self.fontSizeFixed = fontSizeFixed
         self.marginsFixed = marginsFixed
+        self.figureWidthResolutions = figureWidthResolutions
+        self.unreadableResponseFiles = unreadableResponseFiles
     }
 }
 
@@ -183,35 +192,6 @@ public struct LaTeXNormalizer: Sendable {
         }
 
         return (result.joined(separator: "\n"), totalCount)
-    }
-
-    /// 修正圖片的 scale 設定，使用 manifest 中的原始尺寸資訊。
-    public static func fixImageScale(_ source: String, projectDir: URL) -> String {
-        // 讀取 manifest 中的 block 資訊來計算正確的 scale
-        // 如果沒有 manifest 或無法解析，保持原樣
-        let manifestURL = projectDir.appendingPathComponent("manifest.json")
-        guard FileManager.default.fileExists(atPath: manifestURL.path) else { return source }
-
-        // 將 \includegraphics[scale=X] 中不合理的 scale 值修正
-        let pattern = #"\\includegraphics\[scale=(\d+\.?\d*)\]"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return source }
-        let ns = source as NSString
-        let range = NSRange(location: 0, length: ns.length)
-
-        var result = source
-        let matches = regex.matches(in: source, range: range).reversed()
-        for match in matches {
-            let scaleStr = ns.substring(with: match.range(at: 1))
-            guard let scale = Double(scaleStr) else { continue }
-            // scale > 2 通常是 AI 幻覺，修正為 0.8
-            if scale > 2.0 {
-                let oldText = ns.substring(with: match.range)
-                let newText = oldText.replacingOccurrences(of: "scale=\(scaleStr)", with: "scale=0.8")
-                result = (result as NSString).replacingCharacters(
-                    in: match.range, with: newText)
-            }
-        }
-        return result
     }
 
     // MARK: - Project-Level Normalization
@@ -460,9 +440,11 @@ public struct LaTeXNormalizer: Sendable {
         //     也必須在 5.5／5.6 章節修正之後執行（才看得到修正後的 \chapter）。
         mainSource = Self.insertPageCounters(mainSource)
 
-        // 14. 修正圖片 scale（需要 manifest + responses）
+        // 14. 依 FigureRegion.bbox 還原圖片寬度（需要 manifest + responses + page marker；
+        //     必須在步驟 15 移除標記之前）。未改寫者連同原因記入報告，不套任何 fallback 比例。
         let projectDir = mainTexURL.deletingLastPathComponent()
-        mainSource = Self.fixImageScale(mainSource, projectDir: projectDir)
+        let figureWidths = Self.applyFigureWidths(mainSource, projectDir: projectDir)
+        mainSource = figureWidths.result
 
         // 15. 套用既有的字串級清理（符號替換、跨頁重複、頁面標記）
         mainSource = applySymbolRules(mainSource)
@@ -492,7 +474,9 @@ public struct LaTeXNormalizer: Sendable {
             paperSizeFixed: paperSizeFixed,
             fontPackageFixed: fontPackageFixed,
             fontSizeFixed: fontSizeFixed,
-            marginsFixed: marginsFixed
+            marginsFixed: marginsFixed,
+            figureWidthResolutions: figureWidths.resolutions,
+            unreadableResponseFiles: figureWidths.unreadableResponseFiles
         )
     }
 
