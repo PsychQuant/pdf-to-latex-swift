@@ -1292,113 +1292,176 @@ public struct LaTeXNormalizer: Sendable {
 
     // MARK: - Split List Environment Fix
 
-    /// 修正跨頁時列表環境被過早關閉的問題。
-    /// 偵測 \end{enumerate/itemize} 後接頁面標記再接 \item 的模式，
-    /// 移除過早的 \end{...} 並在孤立 items 後補上正確的結束標記。
-    /// 冪等：已正確配對的環境不會被修改。
+    /// 修正跨頁時列表環境被過早關閉的問題：AI 逐頁轉寫時，前一頁結尾關閉了列表，下一頁開頭的 `\item`
+    /// 就成了孤立的 item（LaTeX 報 `Lonely \item`）。移除過早的 `\end{…}`，並在孤立 items 之後補上結尾
+    /// （後面已有結尾時沿用）。
     ///
-    /// 頁面標記只認 `LaTeXSourceScan.markerLines`（PsychQuant/macdoc#215）；verbatim 類環境與
-    /// `\verb` 裡長得像 marker 的文字不是分頁。verbatim 的位元組一律不動：
-    /// - 過早的 `\end{...}` 那一行、以及判定「已有結束標記」的 `\end{...}` 那一行，都必須不碰到
-    ///   verbatim（`LaTeXSourceScan.lineTouchesVerbatim`）；
-    /// - 略過的空行必須不碰到 verbatim；
-    /// - 需要補上 `\end{...}` 而最後一個孤立 item 的行尾換行是 verbatim（例如該行以 `\verb` 結尾，
-    ///   下一行是它的內容）時，插入會落進 verbatim 內容：這一處整個不修正（也不刪過早的 `\end`）。
+    /// ## 何時修正（PsychQuant/macdoc#215、Codex R4；以下條件都要成立）
+    ///
+    /// 依作用中的程式碼（`LaTeXSourceScan.isActive`：不含註解、verbatim、巨集定義、document 之外）追蹤
+    /// 環境堆疊。堆疊模擬的是「已修正的文件」：同一輪較早的修正會讓列表繼續開著，所以同一個列表連續跨好幾頁
+    /// 也一輪修完，第二輪不再改（冪等）。
+    ///
+    /// 1. 過早的結尾：整行恰好是 `\end{enumerate}` 或 `\end{itemize}`（去頭尾空白與 CR），不碰到 verbatim，
+    ///    而且它關閉的是堆疊頂端的同名環境、關閉後**沒有任何環境還開著**。列表外面還有環境時不修：外層
+    ///    是列表時 `\item` 屬於外層；`center`、`quote` 等本身是 trivlist，`\item` 在裡面也合法（pdflatex
+    ///    實測可編譯），無法確定是孤立的。
+    /// 2. 它之後到第一個 `\item` 之間只有空行與 page marker，且**至少有一個 page marker**（只修跨頁）。
+    ///    `\item` 指該行第一個 token 是作用中的控制字 `\item`（`\itemsep` 不算）。
+    /// 3. 孤立 items：從第一個 `\item` 起，連續的 `\item` 行、空行與 marker 行；這一段裡的環境必須自己配對
+    ///    完整（否則補上的結尾會落進內層環境）。
+    /// 4. 孤立 items 之後（略過空行與 marker）若整行恰好是同名的 `\end{…}`，就沿用它；否則在最後一個孤立
+    ///    item 之後補上一行。補上的位置若是 verbatim 內容（例如該行以 `\verb` 結尾），這一處整個不修正。
+    ///
+    /// 空行與 marker 行都必須不碰到 verbatim。遇到無法配對的 `\end{…}`（或讀不到環境名稱）時，之後的結構
+    /// 無法確定，不再找新的修正。verbatim 類環境與 `\verb` 裡長得像 marker、`\end{…}`、`\item` 的文字都不算。
+    /// 編輯後 verbatim 內容有任何變化就整份不動（安全網）。
     public static func fixSplitListEnvironments(_ source: String) -> String {
-        let lines = source.components(separatedBy: "\n")
-        // scan 的行與以 LF 切開的行一一對應。
         let scan = LaTeXSourceScan(source)
+        // scan 的行與以 LF 切開的行一一對應。
+        let lines = source.components(separatedBy: "\n")
         let markerLines = Set(scan.markerLines)
+        let blanks = CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\r"))
+        let wordsByStart = Dictionary(
+            scan.controlWords.map { ($0.start, $0) }, uniquingKeysWith: { first, _ in first }
+        )
+
+        func trimmed(_ line: Int) -> String { lines[line].trimmingCharacters(in: blanks) }
         /// 空行或 page marker 行，且不碰到 verbatim。
-        func isSkippable(_ index: Int) -> Bool {
-            guard !scan.lineTouchesVerbatim(index) else { return false }
-            return markerLines.contains(index) || lines[index].trimmingCharacters(in: .whitespaces).isEmpty
+        func isSkippable(_ line: Int) -> Bool {
+            guard !scan.lineTouchesVerbatim(line) else { return false }
+            return markerLines.contains(line) || trimmed(line).isEmpty
+        }
+        /// 該行第一個 token 是作用中的 `\item`。
+        func startsWithItem(_ line: Int) -> Bool {
+            guard let first = scan.firstNonBlank(line: line), scan.isActive(first) else { return false }
+            return wordsByStart[first]?.name == "item"
+        }
+        /// 整行恰好是 `\end{name}`、不碰到 verbatim，且那個 `\end` 是作用中的程式碼。
+        func isWholeLineEnd(_ line: Int, _ name: String) -> Bool {
+            guard trimmed(line) == "\\end{\(name)}", !scan.lineTouchesVerbatim(line),
+                  let first = scan.firstNonBlank(line: line) else { return false }
+            return scan.isActive(first)
         }
 
-        // 第一遍：找出需要移除的 \end{...} 行索引和需要插入 \end{...} 的位置
+        struct EnvironmentEvent {
+            let isBegin: Bool
+            /// nil：讀不到環境名稱。
+            let name: String?
+            let line: Int
+        }
+        let events: [EnvironmentEvent] = scan.controlWords.compactMap { word in
+            guard word.name == "begin" || word.name == "end", scan.isActive(word.start) else { return nil }
+            let name = scan.readGroupArgument(from: word.end)?.text.trimmingCharacters(in: .whitespaces)
+            return EnvironmentEvent(isBegin: word.name == "begin", name: name, line: scan.line(of: word.start))
+        }
+
         struct SplitFix {
             let removeEndLine: Int
-            let envType: String  // "enumerate" 或 "itemize"
-            let insertEndAfterLine: Int?  // 若後方沒有 \end{...} 則需插入
+            let envType: String
+            /// 需要補上結尾時，補在這一行之後。
+            let insertEndAfterLine: Int?
         }
-
         var fixes: [SplitFix] = []
-        var i = 0
+        var stack: [String] = []
+        var index = 0
 
-        while i < lines.count {
-            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
-
-            // 偵測 \end{enumerate} 或 \end{itemize}（不碰到 verbatim 的那一行才算）
-            var envType: String? = nil
-            if trimmed == "\\end{enumerate}" { envType = "enumerate" }
-            else if trimmed == "\\end{itemize}" { envType = "itemize" }
-
-            if let env = envType, !scan.lineTouchesVerbatim(i) {
-                // 往後掃描：跳過空行和頁面標記
-                var j = i + 1
-                while j < lines.count && isSkippable(j) {
-                    j += 1
-                }
-
-                // 下一個非空行是否以 \item 開頭？
-                if j < lines.count && lines[j].trimmingCharacters(in: .whitespaces).hasPrefix("\\item") {
-                    // 找到跨頁拆分！找出孤立 items 的結尾
-                    var lastItemLine = j
-                    var k = j + 1
-                    while k < lines.count {
-                        let kTrimmed = lines[k].trimmingCharacters(in: .whitespaces)
-                        if kTrimmed.hasPrefix("\\item") {
-                            lastItemLine = k
-                            k += 1
-                        } else if isSkippable(k) {
-                            k += 1
-                        } else {
-                            break
-                        }
-                    }
-
-                    // 檢查孤立 items 後是否已有 \end{...}
-                    var hasClosingEnd = false
-                    var checkLine = lastItemLine + 1
-                    while checkLine < lines.count {
-                        if isSkippable(checkLine) {
-                            checkLine += 1
-                            continue
-                        }
-                        let check = lines[checkLine].trimmingCharacters(in: .whitespaces)
-                        if check == "\\end{\(env)}" && !scan.lineTouchesVerbatim(checkLine) {
-                            hasClosingEnd = true
-                        }
-                        break
-                    }
-
-                    // 補上的 \end{...} 會落在最後一個孤立 item 的行尾換行之後；那個換行若是 verbatim，
-                    // 插入就改到 verbatim 內容：整處不修正。
-                    if !hasClosingEnd && scan.lineEndIsVerbatim(lastItemLine) {
-                        i += 1
-                        continue
-                    }
-
-                    fixes.append(SplitFix(
-                        removeEndLine: i,
-                        envType: env,
-                        insertEndAfterLine: hasClosingEnd ? nil : lastItemLine
-                    ))
-                }
+        eventLoop: while index < events.count {
+            let event = events[index]
+            guard let name = event.name else { break }
+            if event.isBegin {
+                stack.append(name)
+                index += 1
+                continue
             }
-            i += 1
+            guard stack.last == name else { break }  // 無法配對：之後的結構無法確定
+
+            // 條件 1：整行的過早結尾，關閉後沒有任何環境還開著。
+            let i = event.line
+            guard (name == "enumerate" || name == "itemize"), stack.count == 1, isWholeLineEnd(i, name) else {
+                stack.removeLast()
+                index += 1
+                continue
+            }
+
+            // 條件 2：之後只有空行與 marker（至少一個 marker），接著是 \item。
+            var j = i + 1
+            var sawMarker = false
+            while j < lines.count && isSkippable(j) {
+                if markerLines.contains(j) { sawMarker = true }
+                j += 1
+            }
+            guard sawMarker, j < lines.count, startsWithItem(j) else {
+                stack.removeLast()
+                index += 1
+                continue
+            }
+
+            // 條件 3：孤立 items 的範圍，其中的環境自己配對完整。
+            var lastItemLine = j
+            var k = j + 1
+            while k < lines.count && (startsWithItem(k) || isSkippable(k)) {
+                if startsWithItem(k) { lastItemLine = k }
+                k += 1
+            }
+            var runEnd = index + 1
+            var runStack: [String] = []
+            var runBalanced = true
+            while runEnd < events.count && events[runEnd].line <= lastItemLine {
+                let inner = events[runEnd]
+                guard let innerName = inner.name else { break eventLoop }
+                if inner.isBegin {
+                    runStack.append(innerName)
+                } else if runStack.last == innerName {
+                    runStack.removeLast()
+                } else {
+                    runBalanced = false
+                    break
+                }
+                runEnd += 1
+            }
+            guard runBalanced && runStack.isEmpty else {
+                stack.removeLast()
+                index += 1
+                continue
+            }
+
+            // 條件 4：沿用後面既有的結尾，或補上一行（補的位置不可在 verbatim 裡）。
+            var checkLine = lastItemLine + 1
+            while checkLine < lines.count && isSkippable(checkLine) { checkLine += 1 }
+            let hasClosingEnd = checkLine < lines.count && isWholeLineEnd(checkLine, name)
+            if !hasClosingEnd && scan.lineEndIsVerbatim(lastItemLine) {
+                stack.removeLast()
+                index += 1
+                continue
+            }
+
+            fixes.append(SplitFix(
+                removeEndLine: i, envType: name, insertEndAfterLine: hasClosingEnd ? nil : lastItemLine
+            ))
+            // 模擬修正後的文件：列表繼續開著；孤立 items 的環境已配對完整；補上的結尾在它們之後關閉列表。
+            index = runEnd
+            if !hasClosingEnd {
+                stack.removeLast()
+            }
         }
 
         guard !fixes.isEmpty else { return source }
 
-        // 套用修正（從後往前以免索引偏移）
+        // 套用修正（從後往前以免索引偏移）。補上的行沿用檔案的換行。
+        let crlf = scan.lineEnding == "\r\n"
         var resultLines = lines
         for fix in fixes.reversed() {
-            // 插入 \end{...}（若需要）
             if let insertAfter = fix.insertEndAfterLine {
-                resultLines.insert("\\end{\(fix.envType)}", at: insertAfter + 1)
+                let closing = "\\end{\(fix.envType)}"
+                if insertAfter + 1 < resultLines.count {
+                    resultLines.insert(crlf ? closing + "\r" : closing, at: insertAfter + 1)
+                } else {
+                    // 最後一行（沒有結尾換行）：換行加在原本的最後一行，補上的結尾成為新的最後一行。
+                    if crlf { resultLines[insertAfter] += "\r" }
+                    resultLines.append(closing)
+                }
             }
-            // 移除過早的 \end{...}
             resultLines.remove(at: fix.removeEndLine)
         }
 
