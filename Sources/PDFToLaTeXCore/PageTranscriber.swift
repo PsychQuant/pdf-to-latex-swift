@@ -168,9 +168,7 @@ public struct PageTranscriber: Sendable {
             // Post-process 每一頁
             for pageResult in response.pages {
                 // 1. 裁切 figures（帶頁碼前綴）、LaTeX 路徑改寫成裁切檔並補寬度（#208、#209）
-                let pageImagePath = imagePaths.first(where: {
-                    $0.contains(String(format: "page-%04d", pageResult.page))
-                }) ?? imagePaths.first
+                let pageImagePath = Self.resolvedPageImagePath(forPage: pageResult.page, in: project.manifest.pages)
                 let pageWidth = project.manifest.pages.first(where: { $0.number == pageResult.page })?.width
                 let processed = Self.postProcessPage(
                     pageResult, pageImagePath: pageImagePath, pageWidth: pageWidth, projectRoot: project.root
@@ -397,6 +395,21 @@ public struct PageTranscriber: Sendable {
         let figureReport: FigureWidthReport
         /// 裁切時的問題（id 不安全、同頁撞名、裁切失敗），給人看的訊息。
         let notes: [String]
+    }
+
+    /// 依 manifest 找出某一頁的頁面圖路徑，供裁切 figure 用（PsychQuant/macdoc#221）。
+    ///
+    /// 直接以 `PageRecord.number` 在**整份 manifest**（不侷限於目前批次）裡查，不是在這一批
+    /// 送出去的 `imagePaths` 裡用字串比對找。AI 回傳的頁碼如果不在這一批裡（批次外頁碼），
+    /// manifest 裡這一頁本來就有自己的 `renderedImagePath`（前提是它已經被渲染過），照樣能查到
+    /// 正確的圖——不會、也絕不能 fallback 到批次裡任何一張別的頁面圖，那是錯的內容，裁出來的
+    /// figure 卻頂著這一頁的頁碼命名。
+    ///
+    /// 找不到（manifest 裡完全沒有這個頁碼，或這一頁還沒渲染過、`renderedImagePath` 是 nil）時
+    /// 回傳 nil；呼叫端（`cropFigures`）在 `pageImagePath` 為 nil 時本來就會記一筆 note、不裁切、
+    /// 引用維持原樣（與 #208 對裁切失敗的處理一致），這裡不需要另外處理。
+    static func resolvedPageImagePath(forPage page: Int, in manifestPages: [PageRecord]) -> String? {
+        manifestPages.first(where: { $0.number == page })?.renderedImagePath
     }
 
     /// 一頁 AI 回應的後處理（不呼叫 AI，可單獨測試）：
