@@ -139,8 +139,8 @@ extension LaTeXNormalizer {
     ///
     /// ## PDF page labels（PsychQuant/macdoc#211）
     ///
-    /// `pageLabels`（實體頁號 → PDF 的 page label，通常來自 manifest）至少有一頁的 label 與實體頁號不同時
-    /// 進入 label 模式。
+    /// `pageLabels`（實體頁號 → PDF 的 page label，通常來自 manifest）不是空的時候進入 label 模式（例外見
+    /// 本節最後）。
     /// marker 的 N 是實體頁序，label 才是書上印的頁碼，所以錨點的目標（樣式、值）改由 N 那一頁的 label
     /// 決定（封閉列舉，只有這四種情形）：
     ///
@@ -161,8 +161,9 @@ extension LaTeXNormalizer {
     ///
     /// 以下情形不進入 label 模式，維持上述行為、輸出一字不差（封閉列舉）：
     /// - `pageLabels` 是空的（PDF 沒有 `/PageLabels`、或舊 manifest）；
-    /// - 每一頁的 label 都等於它的實體頁號（`/PageLabels` 只是 1、2、3…）：它沒有 marker 以外的資訊，
-    ///   當成 label 只會推翻原始碼明寫的 `\frontmatter` 等切換指令。
+    /// - 每一頁的 label 都等於它的實體頁號（`/PageLabels` 只是 1、2、3…），而且每個 page marker 的頁號
+    ///   都有 label：它沒有 marker 以外的資訊，當成 label 只會推翻原始碼明寫的 `\frontmatter` 等切換指令。
+    ///   有 marker 的頁號沒有 label 時仍是 label 模式，該頁照常回報 `pageLabelMissing`。
     ///
     /// ## 冪等
     ///
@@ -172,8 +173,11 @@ extension LaTeXNormalizer {
         guard let firstMarker = scan.pageMarkers.first else {
             return PageCounterReport(result: source, notes: [])
         }
-        // label 模式只在至少一頁的 label 與它的實體頁號不同時啟用（見「PDF page labels」一節）。
-        let labelMode = pageLabels.contains { $0.value != String($0.key) }
+        // label 模式的啟用條件見「PDF page labels」一節：labels 與實體頁號相同、且涵蓋每個 marker 的頁號時不啟用。
+        let labelMode = !pageLabels.isEmpty && (
+            pageLabels.contains { $0.value != String($0.key) }
+                || scan.pageMarkers.contains { pageLabels[$0.page] == nil }
+        )
 
         var chapters: [ChapterCommand] = []
         for word in scan.controlWords where word.name == "chapter" && scan.isActive(word.start) {
