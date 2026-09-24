@@ -1,8 +1,17 @@
 import XCTest
 @testable import PDFToLaTeXCore
 
-/// 圖片寬度還原（PsychQuant/macdoc#10）：`FigureRegion.bbox` → `width=<w>\textwidth`。
+/// 圖片寬度還原（PsychQuant/macdoc#10、#207）：`FigureRegion.bbox` × 頁寬 →
+/// `width=\ifdim <w>bp>\linewidth\linewidth\else <w>bp\fi`（原書的絕對寬度，以 `\linewidth` 為上限）。
 final class LaTeXFigureWidthTests: XCTestCase {
+
+    /// 本工具寫入的寬度值（PsychQuant/macdoc#207）。
+    static func capped(_ points: String) -> String {
+        "width=\\ifdim \(points)bp>\\linewidth\\linewidth\\else \(points)bp\\fi"
+    }
+
+    /// 規格範例：bbox 寬 0.68 × 頁寬 612bp = 416.16bp。
+    static let w68 = capped("416.16")
 
     // MARK: - Fixture
 
@@ -85,7 +94,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
 
         XCTAssertEqual(report.result, source.replacingOccurrences(
             of: "\\includegraphics{figures/p012-fig01.png}",
-            with: "\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}"
+            with: "\\includegraphics[\(Self.w68)]{figures/p012-fig01.png}"
         ))
         XCTAssertEqual(report.resolutions.count, 1)
         let resolution = try XCTUnwrap(report.resolutions.first)
@@ -96,19 +105,20 @@ final class LaTeXFigureWidthTests: XCTestCase {
             return XCTFail("expected widthApplied, got \(resolution.outcome)")
         }
         XCTAssertEqual(fraction, 0.68, accuracy: 1e-12)
-        XCTAssertEqual(widthPoints, 0.68 * 612, accuracy: 1e-9)  // 416.16pt ≈ 5.78in
+        XCTAssertEqual(widthPoints, 416.16)  // 寫進原始碼的 bp 值（0.68 × 612bp ≈ 5.78in）
+        XCTAssertFalse(resolution.replacedLegacyWidth)
     }
 
     func testExtensionlessPathMatchesCroppedPNG() throws {
         try writeSpecExample()
         let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01}")
-        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[\(Self.w68)]{figures/p012-fig01}")
     }
 
     func testStarredFormAndSpacingAreHandled() throws {
         try writeSpecExample()
         let report = apply("%% === Page 12 ===\n\\includegraphics* {figures/p012-fig01.png}")
-        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics*[width=0.68\\textwidth] {figures/p012-fig01.png}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics*[\(Self.w68)] {figures/p012-fig01.png}")
     }
 
     // MARK: - Merge rule for existing options
@@ -146,14 +156,14 @@ final class LaTeXFigureWidthTests: XCTestCase {
         let report = apply(source)
         XCTAssertEqual(
             report.result,
-            "%% === Page 12 ===\n\\includegraphics[angle=90, trim={1 2 3 4}, clip,width=0.68\\textwidth]{figures/p012-fig01.png}"
+            "%% === Page 12 ===\n\\includegraphics[angle=90, trim={1 2 3 4}, clip,\(Self.w68)]{figures/p012-fig01.png}"
         )
     }
 
     func testEmptyOptionBracketGetsWidth() throws {
         try writeSpecExample()
         let report = apply("%% === Page 12 ===\n\\includegraphics[]{figures/p012-fig01.png}")
-        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[\(Self.w68)]{figures/p012-fig01.png}")
     }
 
     // MARK: - Leave unchanged + report
@@ -257,7 +267,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
         try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.12, 0.08, 0.68, 0.31])])
         try writeImage("figures/p012-fig01.png")
         let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}")
-        XCTAssertTrue(report.result.contains("[width=0.68\\textwidth]"))
+        XCTAssertTrue(report.result.contains("[\(Self.w68)]"))
     }
 
     func testUnreadableResponseFileIsReported_fencedResponseIsRead() throws {
@@ -270,7 +280,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
         """)
         try writeImage("figures/p012-fig01.png")
         let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}")
-        XCTAssertTrue(report.result.contains("[width=0.68\\textwidth]"))
+        XCTAssertTrue(report.result.contains("[\(Self.w68)]"))
         XCTAssertEqual(report.unreadableResponseFiles, ["responses/pages-010-011.json"])
     }
 
@@ -291,9 +301,9 @@ final class LaTeXFigureWidthTests: XCTestCase {
         let report = apply(source)
         XCTAssertEqual(report.result, """
         %% === Page 12 ===
-        \\includegraphics[width=0.4\\textwidth]{figures/fig1.png}
+        \\includegraphics[\(Self.capped("244.8"))]{figures/fig1.png}
         %% === Page 15 ===
-        \\includegraphics[width=0.9\\textwidth]{figures/fig1.png}
+        \\includegraphics[\(Self.capped("550.8"))]{figures/fig1.png}
         """)
         XCTAssertEqual(report.resolutions.map(\.page), [12, 15])
     }
@@ -333,7 +343,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
         """
         let report = apply(source)
         XCTAssertEqual(report.result, source.replacingOccurrences(
-            of: "100\\% \\includegraphics{", with: "100\\% \\includegraphics[width=0.68\\textwidth]{"
+            of: "100\\% \\includegraphics{", with: "100\\% \\includegraphics[\(Self.w68)]{"
         ))
         XCTAssertEqual(report.resolutions.count, 1)
         XCTAssertEqual(report.resolutions.first?.line, 4)
@@ -372,7 +382,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
             let report = apply(source)
             XCTAssertTrue(report.result.contains(block), env.begin)
             XCTAssertTrue(report.result.hasSuffix(
-                "\(env.end)\n\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}"
+                "\(env.end)\n\\includegraphics[\(Self.w68)]{figures/p012-fig01.png}"
             ), env.begin)
             XCTAssertEqual(report.resolutions.map(\.page), [12], env.begin)
         }
@@ -394,7 +404,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
         """
         let source = "%% === Page 12 ===\n\(block)\n\\includegraphics{figures/p012-fig01.png}"
         let report = apply(source)
-        XCTAssertEqual(report.result, "%% === Page 12 ===\n\(block)\n\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\(block)\n\\includegraphics[\(Self.w68)]{figures/p012-fig01.png}")
         XCTAssertEqual(report.resolutions.map(\.page), [12])
     }
 
@@ -407,7 +417,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
         """
         let report = apply(source)
         XCTAssertEqual(report.result, source.replacingOccurrences(
-            of: "\\verb|%| \\includegraphics{", with: "\\verb|%| \\includegraphics[width=0.68\\textwidth]{"
+            of: "\\verb|%| \\includegraphics{", with: "\\verb|%| \\includegraphics[\(Self.w68)]{"
         ))
         XCTAssertEqual(report.resolutions.map(\.line), [3])
     }
@@ -454,7 +464,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
         let report = apply(source)
         XCTAssertEqual(
             report.result,
-            "%% === Page 12 ===\n\\includegraphics[angle=90,width=0.68\\textwidth% width=3cm\n]{figures/p012-fig01.png}"
+            "%% === Page 12 ===\n\\includegraphics[angle=90,\(Self.w68)% width=3cm\n]{figures/p012-fig01.png}"
         )
     }
 
@@ -462,10 +472,10 @@ final class LaTeXFigureWidthTests: XCTestCase {
     func testWidthIsNeverAppendedAfterACommentOnTheSameLine() throws {
         try writeSpecExample()
         let cases: [(String, String)] = [
-            ("[clip % note\n]", "[clip,width=0.68\\textwidth % note\n]"),
-            ("[clip % ] not the end\n]", "[clip,width=0.68\\textwidth % ] not the end\n]"),
-            ("[% only a comment\n]", "[width=0.68\\textwidth% only a comment\n]"),
-            ("[clip,% note\n]", "[clip,width=0.68\\textwidth% note\n]"),
+            ("[clip % note\n]", "[clip,\(Self.w68) % note\n]"),
+            ("[clip % ] not the end\n]", "[clip,\(Self.w68) % ] not the end\n]"),
+            ("[% only a comment\n]", "[\(Self.w68)% only a comment\n]"),
+            ("[clip,% note\n]", "[clip,\(Self.w68)% note\n]"),
         ]
         for (options, expected) in cases {
             let source = "%% === Page 12 ===\n\\includegraphics\(options){figures/p012-fig01.png}"
@@ -476,7 +486,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
                 options
             )
             for line in report.result.components(separatedBy: "\n") {
-                if let percent = line.firstIndex(of: "%"), let width = line.range(of: "width=0.68") {
+                if let percent = line.firstIndex(of: "%"), let width = line.range(of: "width=\\ifdim") {
                     XCTAssertLessThan(width.lowerBound, percent, "width after a comment in: \(line)")
                 }
             }
@@ -497,7 +507,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
         try writeSpecExample()
         let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-% note\n      fig01.png}"
         let report = apply(source)
-        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[width=0.68\\textwidth]{figures/p012-% note\n      fig01.png}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[\(Self.w68)]{figures/p012-% note\n      fig01.png}")
         guard case .widthApplied = report.resolutions.first?.outcome else {
             return XCTFail("expected widthApplied, got \(String(describing: report.resolutions.first?.outcome))")
         }
@@ -507,7 +517,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
         try writeSpecExample()
         let source = "%% === Page 12 ===\n\\includegraphics% note\n{figures/p012-fig01.png}"
         let report = apply(source)
-        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[width=0.68\\textwidth]% note\n{figures/p012-fig01.png}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[\(Self.w68)]% note\n{figures/p012-fig01.png}")
     }
 
     // MARK: - Option values with braces and commas
@@ -516,9 +526,9 @@ final class LaTeXFigureWidthTests: XCTestCase {
         try writeSpecExample()
         let cases: [(String, String)] = [
             ("[angle=90, trim={1, 2, 3, 4}, viewport={0 {0} 10 10}, clip]",
-             "[angle=90, trim={1, 2, 3, 4}, viewport={0 {0} 10 10}, clip,width=0.68\\textwidth]"),
-            ("[alt={width=3cm}]", "[alt={width=3cm},width=0.68\\textwidth]"),
-            ("[alt={a]b}, clip]", "[alt={a]b}, clip,width=0.68\\textwidth]"),
+             "[angle=90, trim={1, 2, 3, 4}, viewport={0 {0} 10 10}, clip,\(Self.w68)]"),
+            ("[alt={width=3cm}]", "[alt={width=3cm},\(Self.w68)]"),
+            ("[alt={a]b}, clip]", "[alt={a]b}, clip,\(Self.w68)]"),
         ]
         for (options, expected) in cases {
             let source = "%% === Page 12 ===\n\\includegraphics\(options){figures/p012-fig01.png}"
@@ -533,7 +543,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
     func testStarredFormWithOptions() throws {
         try writeSpecExample()
         let report = apply("%% === Page 12 ===\n\\includegraphics*[clip]{figures/p012-fig01.png}")
-        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics*[clip,width=0.68\\textwidth]{figures/p012-fig01.png}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics*[clip,\(Self.w68)]{figures/p012-fig01.png}")
     }
 
     func testMultipleCallsOnOneLine() throws {
@@ -548,32 +558,33 @@ final class LaTeXFigureWidthTests: XCTestCase {
         let report = apply(source)
         XCTAssertEqual(
             report.result,
-            "%% === Page 12 ===\n\\includegraphics[width=0.45\\textwidth]{figures/p012-fig01.png}\\hfill\\includegraphics[angle=90,width=0.4\\textwidth]{figures/p012-fig02.png}"
+            "%% === Page 12 ===\n\\includegraphics[\(Self.capped("275.4"))]{figures/p012-fig01.png}\\hfill\\includegraphics[angle=90,\(Self.capped("244.8"))]{figures/p012-fig02.png}"
         )
         XCTAssertEqual(report.resolutions.map(\.line), [2, 2])
     }
 
     // MARK: - Width formatting
 
+    /// bbox 寬先取六位小數（`fraction`），乘上頁寬後取四位小數、去掉尾端 0 寫入（`widthPoints`）。
     func testSmallWidthsKeepSignificantDigitsAndReportWhatIsWritten() throws {
         try writeManifest(pages: [(12, 600)])
         try writeImage("figures/p012-fig01.png")
-        let cases: [(bboxWidth: Double, written: String)] = [
-            (0.0000123, "0.000012"),
-            (0.1234567, "0.123457"),
-            (0.5, "0.5"),
-            (1.0, "1"),
+        let cases: [(bboxWidth: Double, fraction: Double, written: String)] = [
+            (0.0000123, 0.000012, "0.0072"),
+            (0.1234567, 0.123457, "74.0742"),
+            (0.5, 0.5, "300"),
+            (1.0, 1, "600"),
         ]
-        for (bboxWidth, written) in cases {
+        for (bboxWidth, expectedFraction, written) in cases {
             try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0, 0.1, bboxWidth, 0.2])])
             let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}")
-            XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[width=\(written)\\textwidth]{figures/p012-fig01.png}")
+            XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[\(Self.capped(written))]{figures/p012-fig01.png}")
             guard case let .widthApplied(fraction, widthPoints) = report.resolutions.first?.outcome else {
                 XCTFail("expected widthApplied for \(bboxWidth)")
                 continue
             }
-            XCTAssertEqual(fraction, Double(written))
-            XCTAssertEqual(widthPoints, Double(written)! * 600, accuracy: 1e-9)
+            XCTAssertEqual(fraction, expectedFraction)
+            XCTAssertEqual(widthPoints, Double(written))
         }
     }
 
@@ -585,6 +596,221 @@ final class LaTeXFigureWidthTests: XCTestCase {
         let report = apply(source)
         XCTAssertEqual(report.result, source)
         XCTAssertEqual(report.resolutions.first?.outcome, .widthNotRepresentable(4e-7))
+    }
+
+    /// 比例本身寫得出來，但乘上（很窄的）頁寬之後以四位小數表示是 0：同樣不寫入。
+    func testPointWidthThatWouldRoundToZeroIsLeftUnchangedAndReported() throws {
+        try writeManifest(pages: [(12, 10)])
+        try writeImage("figures/p012-fig01.png")
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.1, 0.1, 0.000001, 0.2])])
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.first?.outcome, .widthNotRepresentable(0.000001))
+    }
+
+    /// 頁寬超過 PDF 的頁面上限（14400 單位 = 200in）視為無效：換算出的尺寸可能超過 TeX 的
+    /// \maxdimen，寫進去會讓文件無法編譯。
+    func testImplausiblePageWidthIsTreatedAsInvalidPageRecord() throws {
+        // NaN／∞ 無法寫進 JSON manifest，由 `isFinite` 守住（與 #10 相同）。
+        for width in [14400.5, 1e9, -612, 0] {
+            try writeManifest(pages: [(12, width)])
+            try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.12, 0.08, 0.68, 0.31])])
+            try writeImage("figures/p012-fig01.png")
+            let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+            let report = apply(source)
+            XCTAssertEqual(report.result, source, "page width \(width)")
+            XCTAssertEqual(report.resolutions.first?.outcome, .missingPageRecord, "page width \(width)")
+        }
+    }
+
+    func testPageWidthAtThePDFLimitIsStillValid() throws {
+        try writeManifest(pages: [(12, 14400)])
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0, 0.08, 1, 0.31])])
+        try writeImage("figures/p012-fig01.png")
+        let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[\(Self.capped("14400"))]{figures/p012-fig01.png}")
+    }
+
+    // MARK: - v0.3.0 的相對寬度升級（PsychQuant/macdoc#207）
+
+    /// v0.3.0 寫出的四種形狀（`[…]` 新建、空選項、接在逗號後、補逗號），值與該頁 bbox
+    /// 以同一格式化規則算出的比例逐字相同 → 視為本工具的舊輸出，升級成新格式。
+    func testLegacyToolWidthIsUpgraded() throws {
+        try writeSpecExample()
+        let cases: [(String, String)] = [
+            ("[width=0.68\\textwidth]", "[\(Self.w68)]"),
+            ("[width=0.68\\textwidth ]", "[\(Self.w68) ]"),
+            ("[clip,width=0.68\\textwidth]", "[clip,\(Self.w68)]"),
+            ("[angle=90, trim={1 2 3 4},width=0.68\\textwidth % note\n]", "[angle=90, trim={1 2 3 4},\(Self.w68) % note\n]"),
+            ("[width=0.68\\textwidth% only a comment\n]", "[\(Self.w68)% only a comment\n]"),
+        ]
+        for (options, expected) in cases {
+            let source = "%% === Page 12 ===\n\\includegraphics\(options){figures/p012-fig01.png}"
+            let report = apply(source)
+            XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics\(expected){figures/p012-fig01.png}", options)
+            let resolution = try XCTUnwrap(report.resolutions.first)
+            XCTAssertTrue(resolution.replacedLegacyWidth, options)
+            guard case let .widthApplied(fraction, widthPoints) = resolution.outcome else {
+                XCTFail("\(options): expected widthApplied, got \(resolution.outcome)")
+                continue
+            }
+            XCTAssertEqual(fraction, 0.68)
+            XCTAssertEqual(widthPoints, 416.16)
+
+            let second = apply(report.result)
+            XCTAssertEqual(second.result, report.result, "second run must not change \(options)")
+            XCTAssertEqual(second.resolutions.first?.outcome, .explicitSizePreserved, options)
+            XCTAssertFalse(second.resolutions.first?.replacedLegacyWidth ?? true, options)
+        }
+    }
+
+    /// 只要不是本工具會寫出的精確形狀，或值與 bbox 對不上，就當成使用者寫的尺寸原樣保留。
+    func testWidthsThatAreNotExactlyTheLegacyToolOutputArePreserved() throws {
+        try writeSpecExample()
+        let preserved = [
+            "[width=0.5\\textwidth]",             // 值與 bbox（0.68）不符
+            "[width=0.680\\textwidth]",           // 不是本工具的數字格式
+            "[width=.68\\textwidth]",
+            "[ width=0.68\\textwidth]",           // 本工具不會在 key 前留空白
+            "[clip, width=0.68\\textwidth]",
+            "[width = 0.68\\textwidth]",
+            "[width=0.68 \\textwidth]",
+            "[width={0.68\\textwidth}]",
+            "[width=0.68\\textwidth,clip]",        // 不是最後一個選項
+            "[width=0.68\\linewidth]",            // 不是 \textwidth
+            "[width=0.68\\textwidth\\relax]",
+            "[height=2cm,width=0.68\\textwidth]", // 另有尺寸 key：v0.3.0 不會補 width
+            "[scale=1,width=0.68\\textwidth]",
+            "[width=1cm,width=0.68\\textwidth]",
+            "[width=0.68\\textwidth,% c\n]",
+            "[wid% c\nth=0.68\\textwidth]",
+        ]
+        for options in preserved {
+            let source = "%% === Page 12 ===\n\\includegraphics\(options){figures/p012-fig01.png}"
+            let report = apply(source)
+            XCTAssertEqual(report.result, source, options)
+            XCTAssertEqual(report.resolutions.first?.outcome, .explicitSizePreserved, options)
+            XCTAssertFalse(report.resolutions.first?.replacedLegacyWidth ?? true, options)
+        }
+    }
+
+    /// 形狀相同但對不上 metadata（沒有這張圖、頁寬無效、圖檔不存在、沒有 page marker）時，
+    /// 不能證明是本工具寫的，原樣保留。
+    func testLegacyShapeWithoutMatchingMetadataIsPreserved() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeResponse("pages-012-013.json", figures: [
+            (12, "p012-fig01", [0.12, 0.08, 0.68, 0.31]),
+            (12, "p012-fig02", [0.12, 0.08, 0.68, 0.31]),
+        ])
+        try writeImage("figures/p012-fig01.png")  // p012-fig02 沒有裁切檔
+        let source = """
+        \\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}
+        %% === Page 12 ===
+        \\includegraphics[width=0.68\\textwidth]{figures/p012-fig02.png}
+        \\includegraphics[width=0.68\\textwidth]{figures/p012-fig03.png}
+        """
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.map(\.outcome), [.explicitSizePreserved, .explicitSizePreserved, .explicitSizePreserved])
+    }
+
+    func testLegacyShapeInsideVerbatimOrDefinitionIsNeverTouched() throws {
+        try writeSpecExample()
+        let source = """
+        %% === Page 12 ===
+        \\begin{verbatim}
+        \\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}
+        \\end{verbatim}
+        \\newcommand{\\figA}{\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}}
+        % \\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}
+        """
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions, [])
+    }
+
+    /// 只有明確尺寸（且不是舊版形狀）時不需要 metadata：不讀 responses，也不回報讀不到的檔案。
+    func testExplicitNonLegacySizesDoNotLoadMetadata() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeRawResponse("pages-010-011.json", "not json at all")
+        let report = apply("%% === Page 12 ===\n\\includegraphics[width=3cm]{figures/p012-fig01.png}")
+        XCTAssertEqual(report.resolutions.map(\.outcome), [.explicitSizePreserved])
+        XCTAssertEqual(report.unreadableResponseFiles, [])
+    }
+
+    // MARK: - 帶頁碼前綴的裁切檔（PsychQuant/macdoc#208）
+
+    /// 轉寫時 id `fig1` 的第 18 頁裁切圖存成 `figures/p018-fig1.png`；normalize 以（頁, 完整路徑）
+    /// 仍配得上，且不會借用第 19 頁同 id 的 bbox。
+    func testPagePrefixedCroppedPathsMatchTheirOwnPage() throws {
+        try writeManifest(pages: [(18, 612), (19, 612)])
+        try writeResponse("pages-018-019.json", figures: [
+            (18, "fig1", [0.1, 0.1, 0.4, 0.2]),
+            (19, "fig1", [0.05, 0.1, 0.9, 0.2]),
+        ])
+        try writeImage("figures/p018-fig1.png")
+        try writeImage("figures/p019-fig1.png")
+        let source = """
+        %% === Page 18 ===
+        \\includegraphics{figures/p018-fig1.png}
+        %% === Page 19 ===
+        \\includegraphics{figures/p019-fig1}
+        \\includegraphics{figures/p018-fig1.png}
+        """
+        let report = apply(source)
+        XCTAssertEqual(report.result, """
+        %% === Page 18 ===
+        \\includegraphics[\(Self.capped("244.8"))]{figures/p018-fig1.png}
+        %% === Page 19 ===
+        \\includegraphics[\(Self.capped("550.8"))]{figures/p019-fig1}
+        \\includegraphics{figures/p018-fig1.png}
+        """)
+        XCTAssertEqual(report.resolutions.last?.outcome, .noMatchingFigure)
+    }
+
+    /// id 已經帶本頁前綴（提示詞要求的 `pXXX-figYY`）時不重複加前綴，路徑與 v0.3.0 相同。
+    func testIdAlreadyCarryingThePagePrefixKeepsItsPath() throws {
+        XCTAssertEqual(FigureAssetPath.cropped(page: 12, id: "p012-fig01"), "figures/p012-fig01.png")
+        try writeSpecExample()
+        let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[\(Self.w68)]{figures/p012-fig01.png}")
+    }
+
+    func testCroppedPathNaming() {
+        let cases: [(page: Int, id: String, path: String?)] = [
+            (18, "fig1", "figures/p018-fig1.png"),
+            (18, "p018-fig1", "figures/p018-fig1.png"),
+            (19, "p018-fig1", "figures/p019-p018-fig1.png"),   // 別頁的前綴不算
+            (18, "p18-fig1", "figures/p018-p18-fig1.png"),
+            (7, "Fig_2.b", "figures/p007-Fig_2.b.png"),
+            (1234, "fig1", "figures/p1234-fig1.png"),
+            (18, "", nil),
+            (18, "../p019-fig1", nil),                          // 路徑穿越：會蓋掉別頁的檔
+            (18, "a/b", nil),
+            (18, "a\\b", nil),
+            (18, "a%b", nil),
+            (18, "a b", nil),
+            (18, "a{b}", nil),
+            (18, "圖1", nil),
+        ]
+        for c in cases {
+            XCTAssertEqual(FigureAssetPath.cropped(page: c.page, id: c.id), c.path, "page \(c.page) id \(c.id)")
+        }
+    }
+
+    /// 同一頁兩個 id 正規化後撞名（`fig1` 與 `p018-fig1`）且 bbox 不同：無法判定是哪一張，回報 ambiguous。
+    func testIdsCollidingAfterPrefixingOnTheSamePageAreAmbiguous() throws {
+        try writeManifest(pages: [(18, 612)])
+        try writeResponse("pages-018-019.json", figures: [
+            (18, "fig1", [0.1, 0.1, 0.4, 0.2]),
+            (18, "p018-fig1", [0.1, 0.5, 0.6, 0.2]),
+        ])
+        try writeImage("figures/p018-fig1.png")
+        let source = "%% === Page 18 ===\n\\includegraphics{figures/p018-fig1.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.first?.outcome, .ambiguousFigure)
     }
 
     // MARK: - Idempotency
@@ -639,7 +865,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
         let report1 = try normalizer.normalizeProject(mainTexURL: mainURL)
         let first = try String(contentsOf: mainURL, encoding: .utf8)
         XCTAssertTrue(report1.mainFileChanged)
-        XCTAssertTrue(first.contains("\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}"))
+        XCTAssertTrue(first.contains("\\includegraphics[\(Self.w68)]{figures/p012-fig01.png}"))
         XCTAssertTrue(first.contains("\\includegraphics{figures/p012-fig09.png}"))
         XCTAssertEqual(report1.figureWidthResolutions.map(\.path),
                        ["figures/p012-fig01.png", "figures/p012-fig09.png"])
@@ -682,7 +908,7 @@ final class LaTeXFigureWidthTests: XCTestCase {
         let first = try String(contentsOf: mainURL, encoding: .utf8)
         XCTAssertFalse(first.contains("%% === Page 12 ==="))
         XCTAssertTrue(first.contains("\\begin{verbatim}\n%% === Page 99 ===\n\\includegraphics{figures/p012-fig01.png}\n\\end{verbatim}"))
-        XCTAssertTrue(first.contains("\\end{verbatim}\n\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}"))
+        XCTAssertTrue(first.contains("\\end{verbatim}\n\\includegraphics[\(Self.w68)]{figures/p012-fig01.png}"))
         XCTAssertEqual(report1.figureWidthResolutions.map(\.outcome).count, 2)
         XCTAssertEqual(report1.figureWidthResolutions.last?.outcome, .noMatchingFigure)
 
