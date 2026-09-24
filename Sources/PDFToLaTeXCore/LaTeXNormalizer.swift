@@ -4,6 +4,10 @@ import PDFKit
 // MARK: - Report & Model Types
 
 /// 專案層級清理結果報告。
+///
+/// `Equatable` 是自動合成的，所以 `figureWidthResolutions`、`unreadableResponseFiles`、
+/// `pageCounterNotes` 這三個欄位（PsychQuant/macdoc#9、#10 新增）也參與比較：拿一份用預設值
+/// 建構的報告去和 `normalizeProject` 的結果比較，只要有頁碼或圖片紀錄就會不相等。
 public struct NormalizeProjectReport: Sendable, Equatable {
     public let mainFileChanged: Bool
     public let preambleFileChanged: Bool
@@ -1348,19 +1352,19 @@ public struct LaTeXNormalizer: Sendable {
     // MARK: - Page Markers
 
     /// 移除 %% === Page N === 標記行。
-    /// 只移除真正的註解（`LaTeXSourceScan.isComment`）：verbatim 類環境與 `\verb` 內長得像
-    /// marker 的文字、巨集定義內的註解都保留原樣。
+    /// 只移除「整行恰好是 marker」的行（`LaTeXSourceScan.markerLines`），連同該行的換行一起移除，
+    /// 不動其他行、不合併行：其他註解中間的 marker 文字（`% 例：%% === Page 12 ===`）、marker
+    /// 後面接說明的行、verbatim 類環境與 `\verb` 內的文字、巨集定義內的註解都保留原樣。
     func removePageMarkers(_ source: String) -> String {
-        let pattern = #"%%\s*===\s*Page\s+\d+\s*===\s*\n?"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return source }
-        let ns = source as NSString
-        let matches = regex.matches(in: source, range: NSRange(location: 0, length: ns.length))
-        guard !matches.isEmpty else { return source }
+        guard source.contains("===") else { return source }
         let scan = LaTeXSourceScan(source)
-        let result = NSMutableString(string: source)
-        for match in matches.reversed() where scan.isComment(match.range.location) {
-            result.deleteCharacters(in: match.range)
+        guard !scan.markerLines.isEmpty else { return source }
+        var units = scan.units
+        for line in scan.markerLines.reversed() {
+            let start = scan.lineStarts[line]
+            let end = line + 1 < scan.lineStarts.count ? scan.lineStarts[line + 1] : units.count
+            units.removeSubrange(start..<end)
         }
-        return result as String
+        return String(decoding: units, as: UTF16.self)
     }
 }
