@@ -21,6 +21,21 @@ final class LaTeXPageLabelTests: XCTestCase {
         }
     }
 
+    /// 值必須在 TeX 整數範圍內（pdflatex 實測：`\\setcounter{page}{2147483648}` 是 `! Number too big.`）。
+    func testParsePageLabel_rejectsValuesBeyondTeXIntegers() {
+        XCTAssertEqual(LaTeXNormalizer.parsePageLabel("2147483647")?.value, 2_147_483_647)
+        XCTAssertNil(LaTeXNormalizer.parsePageLabel("2147483648"))
+        XCTAssertEqual(LaTeXNormalizer.parsePageLabel(String(repeating: "m", count: 4))?.value, 4000)
+        XCTAssertNil(LaTeXNormalizer.parsePageLabel(String(repeating: "m", count: 2_147_484)))
+    }
+
+    func testOutOfRangeLabelIsReportedAndLeftAlone() {
+        let input = "\\begin{document}\n%% === Page 1 ===\nText.\n\\end{document}"
+        let report = LaTeXNormalizer.applyPageCounters(input, pageLabels: [1: "2147483648"])
+        XCTAssertEqual(report.result, input)
+        XCTAssertEqual(report.notes, [PageCounterNote(line: 2, kind: .pageLabelUnsupported(page: 1, label: "2147483648"))])
+    }
+
     // MARK: - Counters from labels
 
     private static let frontMatterLabels = [1: "i", 2: "ii", 3: "iii", 4: "iv", 5: "1", 6: "2"]
@@ -103,6 +118,33 @@ final class LaTeXPageLabelTests: XCTestCase {
         // 沒有 label：維持 #9 的行為（roman 區段不插入、arabic 用實體頁序）。
         XCTAssertEqual(LaTeXNormalizer.applyPageCounters(input).result, input
             .replacingOccurrences(of: "\\chapter{Intro}\n", with: "\\chapter{Intro}\n\\setcounter{page}{9}\n"))
+    }
+
+    /// `/PageLabels` 只是 1、2、3…（每頁的 label 都等於實體頁號）：它沒有 marker 以外的資訊，
+    /// 當成 label 只會推翻原始碼明寫的 `\frontmatter`。視同沒有 label，輸出與 #9 相同。
+    func testLabelsEqualToThePhysicalPagesBehaveLikeNoLabels() {
+        let input = """
+        \\begin{document}
+        %% === Page 1 ===
+        \\frontmatter
+        \\chapter*{Preface}
+        Preface text.
+        %% === Page 9 ===
+        \\mainmatter
+        \\chapter{Intro}
+        Intro text.
+        \\end{document}
+        """
+        let trivial = Dictionary(uniqueKeysWithValues: (1...12).map { ($0, String($0)) })
+        XCTAssertEqual(
+            LaTeXNormalizer.applyPageCounters(input, pageLabels: trivial),
+            LaTeXNormalizer.applyPageCounters(input)
+        )
+        // 只要有一頁不同，就是 label 模式。
+        var informative = trivial
+        informative[1] = "i"
+        XCTAssertTrue(LaTeXNormalizer.applyPageCounters(input, pageLabels: informative).result
+            .contains("\\chapter*{Preface}\n\\setcounter{page}{1}\n"))
     }
 
     /// label 與原始碼的切換指令不一致時以 label 為準：在指令之後補上 `\pagenumbering`。

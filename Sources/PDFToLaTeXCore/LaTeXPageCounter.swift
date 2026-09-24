@@ -139,7 +139,8 @@ extension LaTeXNormalizer {
     ///
     /// ## PDF page labels（PsychQuant/macdoc#211）
     ///
-    /// `pageLabels`（實體頁號 → PDF 的 page label，通常來自 manifest）不是空的時候進入 label 模式。
+    /// `pageLabels`（實體頁號 → PDF 的 page label，通常來自 manifest）至少有一頁的 label 與實體頁號不同時
+    /// 進入 label 模式。
     /// marker 的 N 是實體頁序，label 才是書上印的頁碼，所以錨點的目標（樣式、值）改由 N 那一頁的 label
     /// 決定（封閉列舉，只有這四種情形）：
     ///
@@ -158,7 +159,10 @@ extension LaTeXNormalizer {
     /// `\setcounter{page}`。錨點之後已有 counter 時沿用它的值（與沒有 label 時相同），只在樣式不同時
     /// 補上 `\pagenumbering`。
     ///
-    /// `pageLabels` 是空的（PDF 沒有 `/PageLabels`、或舊 manifest）→ 維持上述行為，輸出一字不差。
+    /// 以下情形不進入 label 模式，維持上述行為、輸出一字不差（封閉列舉）：
+    /// - `pageLabels` 是空的（PDF 沒有 `/PageLabels`、或舊 manifest）；
+    /// - 每一頁的 label 都等於它的實體頁號（`/PageLabels` 只是 1、2、3…）：它沒有 marker 以外的資訊，
+    ///   當成 label 只會推翻原始碼明寫的 `\frontmatter` 等切換指令。
     ///
     /// ## 冪等
     ///
@@ -168,7 +172,8 @@ extension LaTeXNormalizer {
         guard let firstMarker = scan.pageMarkers.first else {
             return PageCounterReport(result: source, notes: [])
         }
-        let labelMode = !pageLabels.isEmpty
+        // label 模式只在至少一頁的 label 與它的實體頁號不同時啟用（見「PDF page labels」一節）。
+        let labelMode = pageLabels.contains { $0.value != String($0.key) }
 
         var chapters: [ChapterCommand] = []
         for word in scan.controlWords where word.name == "chapter" && scan.isActive(word.start) {
@@ -384,15 +389,17 @@ extension LaTeXNormalizer {
 
     /// 解析 PDF page label。只有兩種會被採用（封閉列舉，不得依性質相似類推第三種）：
     ///
-    /// 1. 非空、全為 ASCII 數字 → arabic，值為該數字（超出 `Int` 範圍不採用）；
+    /// 1. 非空、全為 ASCII 數字 → arabic，值為該數字；
     /// 2. 全為小寫、或全為大寫的羅馬數字字母（i v x l c d m），且恰好是其數值的標準寫法
     ///    （即 `romanNumeral` 的輸出：`iv` 可、`iiii` 不可）→ roman／Roman。
     ///
-    /// 其他（空字串、帶前綴的 `A-1`、字母編號 `a`、大小寫混用 `Iv`、非 ASCII 數字）都回傳 nil。
+    /// 兩者的值都必須在 TeX 整數範圍內（`texMaxCount`；pdflatex 實測 `\setcounter{page}{2147483648}`
+    /// 是 `! Number too big.`）。其他（空字串、帶前綴的 `A-1`、字母編號 `a`、大小寫混用 `Iv`、非 ASCII
+    /// 數字、超出範圍的值）都回傳 nil。
     static func parsePageLabel(_ label: String) -> (style: PageNumberStyle, value: Int)? {
         guard !label.isEmpty else { return nil }
         if label.unicodeScalars.allSatisfy({ $0.value >= 0x30 && $0.value <= 0x39 }) {
-            guard let value = Int(label) else { return nil }
+            guard let value = Int(label), value <= texMaxCount else { return nil }
             return (.arabic, value)
         }
         let lower = label.lowercased()
@@ -418,9 +425,12 @@ extension LaTeXNormalizer {
                 total += digit
             }
         }
-        guard total > 0, romanNumeral(total) == lower else { return nil }
+        guard total > 0, total <= texMaxCount, romanNumeral(total) == lower else { return nil }
         return (style, total)
     }
+
+    /// TeX 整數（counter）的上限。
+    static let texMaxCount = 2_147_483_647
 
     /// 正整數的標準小寫羅馬數字，與 TeX `\romannumeral`（LaTeX `\roman`）相同：千位以 m 重複。
     /// 0 以下回傳空字串。
