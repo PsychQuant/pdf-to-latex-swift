@@ -38,11 +38,19 @@ public struct PageRenderer: Sendable {
         return renderedPages
     }
 
+    /// 畫布尺寸要用「顯示時」的寬高，不是 mediaBox 原始寬高（PsychQuant/pdf-to-latex-swift#222）：
+    /// `PDFPage.draw(with:.mediaBox,to:)` 對旋轉 90°／270° 的頁面，計算內容位置時是以寬高已互換
+    /// 的畫布為準——canvas 若仍配置成未互換的 mediaBox 尺寸，畫出來的內容會被裁掉一部分，
+    /// 旋轉 270° 時实測整頁內容完全裁掉、渲染出全白圖片（見 `RotationRenderTests`）。
+    /// 0°／180° 不受影響（`PDFScanner.rotationSwapsWidthAndHeight`）。
     private func render(page: PDFPage, pageNumber: Int, outputURL: URL, dpi: Double) throws {
         let bounds = page.bounds(for: .mediaBox)
         let scale = dpi / 72.0
-        let pixelWidth = max(Int((bounds.width * scale).rounded(.up)), 1)
-        let pixelHeight = max(Int((bounds.height * scale).rounded(.up)), 1)
+        let swapped = PDFScanner.rotationSwapsWidthAndHeight(Int(page.rotation))
+        let visualWidth = swapped ? bounds.height : bounds.width
+        let visualHeight = swapped ? bounds.width : bounds.height
+        let pixelWidth = max(Int((visualWidth * scale).rounded(.up)), 1)
+        let pixelHeight = max(Int((visualHeight * scale).rounded(.up)), 1)
 
         guard let context = CGContext(
             data: nil,
