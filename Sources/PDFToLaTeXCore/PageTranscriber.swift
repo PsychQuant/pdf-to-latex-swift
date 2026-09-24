@@ -336,7 +336,9 @@ public struct PageTranscriber: Sendable {
 
     /// 從所有已存在的 per-page .tex 檔案重建完整的可編譯 LaTeX 文件。
     /// 包含 preamble（\\input{preamble}）和 \\end{document}。
-    private func rebuildAccumulated(pageNumbers: [Int], texDir: URL, projectRoot: URL) -> String {
+    /// 不是 `private`：`FigureCropMigration`（PsychQuant/pdf-to-latex-swift#222）重用同一份重建規則，
+    /// 遷移改寫 tex/page-NNNN.tex 之後也要用它重建 accumulated.tex，不重寫一份。
+    func rebuildAccumulated(pageNumbers: [Int], texDir: URL, projectRoot: URL) -> String {
         var body = ""
         for page in pageNumbers {
             let texURL = texDir.appendingPathComponent(String(format: "page-%04d.tex", page))
