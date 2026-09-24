@@ -165,6 +165,39 @@ struct LaTeXSourceScan {
         return start..<end
     }
 
+    /// 這一行、它結尾的換行、或它前面的換行是否有 verbatim 單位（PsychQuant/macdoc#215）。
+    ///
+    /// 為真時，刪除這一行或在它之後插入文字都可能改到 verbatim：`\begin{verbatim}` 那一行（行尾換行
+    /// 已是內容）、verbatim 內容、`\end{verbatim}` 那一行（前面的換行是內容）、含 `\verb` 的行。
+    func lineTouchesVerbatim(_ line: Int) -> Bool {
+        let start = lineStarts[line]
+        let end = line + 1 < lineStarts.count ? lineStarts[line + 1] : units.count
+        return (max(0, start - 1)..<end).contains { kinds[$0] == .verbatim }
+    }
+
+    /// 每一段連續 verbatim 的內容（依出現順序）。以行為單位的編輯用它確認 verbatim 完全沒變：
+    /// 編輯前後的值相同，才表示沒有刪到、插進、或改變任何 verbatim 範圍。
+    var verbatimSegments: [String] {
+        var segments: [String] = []
+        var k = 0
+        while k < units.count {
+            guard kinds[k] == .verbatim else {
+                k += 1
+                continue
+            }
+            let start = k
+            while k < units.count && kinds[k] == .verbatim { k += 1 }
+            segments.append(text(start..<k))
+        }
+        return segments
+    }
+
+    /// 這一行結尾的換行是否為 verbatim（在它之後插入一行會插進 verbatim 內容）。沒有換行時為 false。
+    func lineEndIsVerbatim(_ line: Int) -> Bool {
+        guard line + 1 < lineStarts.count else { return false }
+        return kinds[lineStarts[line + 1] - 1] == .verbatim
+    }
+
     /// 行內第一個非空白（空格／tab）的 offset。
     func firstNonBlank(line: Int) -> Int? {
         let range = lineRange(line)
