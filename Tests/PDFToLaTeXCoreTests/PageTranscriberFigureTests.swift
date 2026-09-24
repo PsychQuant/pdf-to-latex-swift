@@ -154,15 +154,46 @@ final class PageTranscriberFigureTests: XCTestCase {
         XCTAssertTrue(result.notes.first?.contains("p018-fig1.png") ?? false, "\(result.notes)")
     }
 
-    /// 裁切失敗（頁面圖不存在）：路徑仍指向本頁的檔名（不會落回別頁的舊檔），寬度回報 missingImageFile。
-    func testCropFailureStillPointsToThePageOwnPath() throws {
+    /// 大小寫不同的 id（`Fig1`／`fig1`）在 macOS 預設（不分大小寫）的檔案系統上是同一個檔：
+    /// 視為撞名，只裁第一個，寬度回報 ambiguous。
+    func testIdsDifferingOnlyInCaseAreTreatedAsTheSameFile() throws {
+        let image = try writePageImage(page: 18, color: Self.red)
+        let latex = "\\includegraphics{figures/Fig1.png}\n\\includegraphics{figures/fig1.png}"
         let result = process(
-            page: 18, latex: "\\includegraphics{figures/fig1.png}",
+            page: 18, latex: latex,
+            figures: [("Fig1", [0.1, 0.1, 0.4, 0.2]), ("fig1", [0.1, 0.5, 0.6, 0.3])], image: image
+        )
+        XCTAssertEqual(figureFiles(), ["p018-fig1.png"])
+        let crop = try inspect("figures/p018-fig1.png")
+        XCTAssertEqual([crop.width, crop.height], [40, 20])
+        XCTAssertEqual(result.latex, "\\includegraphics{figures/p018-fig1.png}\n\\includegraphics{figures/p018-fig1.png}")
+        XCTAssertEqual(result.figureReport.resolutions.map(\.outcome), [.ambiguousFigure, .ambiguousFigure])
+        XCTAssertEqual(result.notes.count, 1)
+    }
+
+    /// 裁切失敗（頁面圖不存在）：本次沒有產生裁切檔，引用原樣保留（不改指向不存在的檔），
+    /// 寬度回報 missingImageFile，並記一筆 note。
+    func testCropFailureLeavesTheReferenceUnchanged() throws {
+        let latex = "\\includegraphics{figures/fig1.png}\n\\includegraphics[width=3cm]{figures/fig1.png}"
+        let result = process(
+            page: 18, latex: latex,
             figures: [("fig1", [0.1, 0.1, 0.4, 0.2])], image: projectDir.appendingPathComponent("nope.png").path
         )
-        XCTAssertEqual(result.latex, "\\includegraphics{figures/p018-fig1.png}")
-        XCTAssertEqual(result.figureReport.resolutions.map(\.outcome), [.missingImageFile])
+        XCTAssertEqual(result.latex, latex)
+        XCTAssertEqual(result.figureReport.resolutions.map(\.outcome), [.missingImageFile, .explicitSizePreserved])
         XCTAssertEqual(result.notes.count, 1)
+    }
+
+    /// 之前的執行留下的同名裁切檔不算數：只有這次成功寫出的檔才改寫路徑、補寬度。
+    func testStaleCroppedFileFromAnEarlierRunIsNotTrusted() throws {
+        try FileManager.default.createDirectory(at: projectDir.appendingPathComponent("figures"), withIntermediateDirectories: true)
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: projectDir.appendingPathComponent("figures/p018-fig1.png"))
+        let latex = "\\includegraphics{figures/fig1.png}"
+        let result = process(
+            page: 18, latex: latex, figures: [("fig1", [0.1, 0.1, 0.4, 0.2])], image: nil
+        )
+        XCTAssertEqual(result.latex, latex)
+        XCTAssertEqual(result.figureReport.resolutions.map(\.outcome), [.missingImageFile])
     }
 
     func testCallsThatAreNotExecutedAreNeverRewritten() throws {
@@ -172,13 +203,30 @@ final class PageTranscriberFigureTests: XCTestCase {
         \\begin{verbatim}
         \\includegraphics{figures/fig1.png}
         \\end{verbatim}
-        \\newcommand{\\figA}{\\includegraphics{figures/fig1.png}}
         \\verb|\\includegraphics{figures/fig1.png}|
         """
         let result = process(page: 18, latex: latex, figures: [("fig1", [0.1, 0.1, 0.4, 0.2])], image: image)
         XCTAssertEqual(result.latex, latex)
         XCTAssertEqual(result.figureReport.resolutions, [])
         XCTAssertEqual(figureFiles(), ["p018-fig1.png"])  // 裁切與 LaTeX 用不用無關
+    }
+
+    /// 巨集定義內的圖片之後會被呼叫：路徑也要跟著裁切檔改名（否則呼叫時找不到檔）；
+    /// 寬度仍只補在作用中的呼叫（與 normalize 相同），定義內的不回報。
+    func testPathsInsideMacroDefinitionsFollowTheRenamedFile() throws {
+        let image = try writePageImage(page: 18, color: Self.red)
+        let latex = """
+        \\newcommand{\\figA}{\\includegraphics{figures/fig1.png}}
+        \\def\\figB{\\includegraphics[scale=0.5]{figures/fig1}}
+        \\figA \\figB
+        """
+        let result = process(page: 18, latex: latex, figures: [("fig1", [0.1, 0.1, 0.4, 0.2])], image: image)
+        XCTAssertEqual(result.latex, """
+        \\newcommand{\\figA}{\\includegraphics{figures/p018-fig1.png}}
+        \\def\\figB{\\includegraphics[scale=0.5]{figures/p018-fig1.png}}
+        \\figA \\figB
+        """)
+        XCTAssertEqual(result.figureReport.resolutions, [])
     }
 
     // MARK: - #209 width at transcription time
