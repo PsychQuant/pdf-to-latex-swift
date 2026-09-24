@@ -458,4 +458,54 @@ final class FigureCropMigrationTests: XCTestCase {
         )
         XCTAssertEqual(afterMissingTexDir, goodAccumulated, "tex/ 整個消失時不該把 accumulated.tex 覆寫成空內容")
     }
+
+    // MARK: - 協調者加審的第四輪 Codex 回歸：列舉頁碼的檔名規則要跟重建組路徑的規則一致
+
+    /// tex/ 同時有標準檔名 `page-0001.tex` 與非標準的 `page-1.tex`：重建只採用逐字符合
+    /// `page-%04d.tex` 格式的檔名，不會把兩個都解析成頁碼 1 造成內容重複。
+    func testNonCanonicalPageFilenameIsExcludedFromRebuild() throws {
+        let image1 = try writePageImage(page: 1, color: Self.red)
+        try writePageTex(page: 1, content: "Canonical page one.")
+        try "Non-canonical duplicate.".write(
+            to: projectDir.appendingPathComponent("tex/page-1.tex"), atomically: true, encoding: .utf8
+        )
+        try writeResponses([PageResult(page: 1, latex: "", figures: [], confidence: nil, notes: nil)])
+        let project = makeProject(pages: [
+            PageRecord(number: 1, width: 612, height: 792, rotation: 0, renderedImagePath: image1, renderedDPI: nil),
+        ])
+
+        _ = try PageTranscriber().migrateFigureCrops(project: project, pageNumbers: [1])
+
+        let accumulated = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertTrue(accumulated.contains("Canonical page one."), "標準檔名的內容要在")
+        XCTAssertFalse(accumulated.contains("Non-canonical duplicate."), "非標準檔名不該被讀進總文件")
+        let occurrences = accumulated.components(separatedBy: "Canonical page one.").count - 1
+        XCTAssertEqual(occurrences, 1, "第 1 頁的內容不該因為非標準檔名同時存在而重複出現")
+    }
+
+    /// 只有非標準檔名（沒有標準的 `page-0001.tex`）：這個頁碼完全不算進重建，不影響其他頁面。
+    func testOnlyNonCanonicalPageFilenameIsNotCountedAtAll() throws {
+        try FileManager.default.createDirectory(
+            at: projectDir.appendingPathComponent("tex"), withIntermediateDirectories: true
+        )
+        try "Non-canonical only.".write(
+            to: projectDir.appendingPathComponent("tex/page-1.tex"), atomically: true, encoding: .utf8
+        )
+        let image2 = try writePageImage(page: 2, color: Self.blue)
+        try writePageTex(page: 2, content: "Canonical page two.")
+        try writeResponses([PageResult(page: 2, latex: "", figures: [], confidence: nil, notes: nil)])
+        let project = makeProject(pages: [
+            PageRecord(number: 2, width: 612, height: 792, rotation: 0, renderedImagePath: image2, renderedDPI: nil),
+        ])
+
+        _ = try PageTranscriber().migrateFigureCrops(project: project, pageNumbers: [2])
+
+        let accumulated = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertTrue(accumulated.contains("Canonical page two."))
+        XCTAssertFalse(accumulated.contains("Non-canonical only."), "非標準檔名完全不該被算進重建")
+    }
 }

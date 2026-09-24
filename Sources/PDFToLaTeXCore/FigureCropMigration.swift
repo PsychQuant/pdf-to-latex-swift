@@ -187,6 +187,21 @@ extension PageTranscriber {
     /// （`CocoaError.fileReadNoSuchFile`，`contentsOfDirectory` 對不存在路徑實測丟的就是這個）
     /// 當作「合法的空狀態」而回傳 `[]`；其他任何錯誤（權限不足等）原樣往外拋，不臆測。判斷依據
     /// 是操作實際回報的錯誤，不是另一個可能同樣不可靠的前置檢查。
+    ///
+    /// ## 只接受與重建時會組出來的檔名逐字相同（協調者加審的第四輪 Codex 審查）
+    ///
+    /// 重建（`rebuildAccumulated`）用 `String(format: "page-%04d.tex", n)` 從整數反推路徑去讀檔；
+    /// 這裡列舉如果只用寬鬆的正則 `^page-(\d+)\.tex$`（沒有要求四位數補零），`tex/` 目錄裡若同時
+    /// 有 `page-1.tex`（使用者手動留下的）與 `page-0001.tex`（工具自己寫的），兩者都解析成頁碼
+    /// `1`，回傳的清單會出現重複（`[1, 1, ...]`），重建卻兩次都讀 `page-0001.tex`——不是分別處理
+    /// 實際列舉到的檔案，總文件裡第 1 頁的內容會重複。反過來，若目錄裡只有 `page-1.tex`
+    /// （沒有 `page-0001.tex`），寬鬆正則會讓清單裡出現「頁碼 1」，但重建去讀的
+    /// `page-0001.tex` 根本不存在，會撞上前面剛加的「讀不到就 throw」。
+    ///
+    /// 解法：解析出頁碼後，**用同一個 `String(format:)` 反推回檔名，只有跟原始檔名逐字相同才收**
+    /// ——`page-1.tex` 反推出的正確檔名是 `page-0001.tex`，跟自己不同，直接排除；只有真正由這個
+    /// 遷移工具（或轉寫當下）寫出的標準檔名會被接受。因為每個頁碼只有一種合法拼法，
+    /// 列舉出來的頁碼本身結構上不可能重複，`Set` 只是額外的防禦、不是修這個 bug 的必要條件。
     private static func allExistingPageNumbers(texDir: URL) throws -> [Int] {
         let files: [URL]
         do {
@@ -195,14 +210,15 @@ extension PageTranscriber {
             return []
         }
         let regex = try NSRegularExpression(pattern: #"^page-(\d+)\.tex$"#)
-        var numbers: [Int] = []
+        var numbers = Set<Int>()
         for file in files {
             let name = file.lastPathComponent
             let range = NSRange(location: 0, length: (name as NSString).length)
             guard let match = regex.firstMatch(in: name, range: range),
                   let numberRange = Range(match.range(at: 1), in: name),
-                  let number = Int(name[numberRange]) else { continue }
-            numbers.append(number)
+                  let number = Int(name[numberRange]),
+                  name == String(format: "page-%04d.tex", number) else { continue }
+            numbers.insert(number)
         }
         return numbers.sorted()
     }
