@@ -196,14 +196,16 @@ struct LaTeXSourceScan {
     /// 不會改變文件其他地方的配對；刪掉不自成一體的行（例如只有外層列表的 `\end{itemize}`），會。
     ///
     /// 配對（封閉列舉，不得依性質相似類推）：大括號 `{`／`}`；同名的 `\begin{X}`／`\end{X}`；`\[`／`\]`；
-    /// `\(`／`\)`；`$` 的開與關（`$$` 視為兩個）；`\begingroup`／`\endgroup`；`\bgroup`／`\egroup`；
+    /// `\(`／`\)`；行內數學 `$`／`$`；展示數學 `$$`／`$$`（同一行相鄰的兩個 `$`，但正在行內數學中時，
+    /// 第一個 `$` 先關閉行內數學，例如 `$a$$b$`）；`\begingroup`／`\endgroup`；`\bgroup`／`\egroup`；
     /// `\left`／`\right`；名稱以 `if` 開頭的控制字（`\iff` 除外，那是數學符號）／`\fi`。
     ///
     /// 只看 code（註解與 verbatim 不算；`\{`、`\}`、`\$` 是字元）。`\begin`、`\end` 的環境名稱必須在同一行
     /// 讀得到，否則視為不自成一體。判斷錯的方向只會讓段落不被刪（例如 `\ifthenelse` 被當成條件式）。
     func linesAreSelfBalanced(_ lines: [Int]) -> Bool {
         enum Opener: Equatable {
-            case brace, environment(String), displayMath, inlineMath, dollar, group, bgroup, left, conditional
+            case brace, environment(String), displayMath, inlineMath, dollar, displayDollar, group, bgroup, left
+            case conditional
         }
         var stack: [Opener] = []
         func close(_ opener: Opener) -> Bool {
@@ -268,6 +270,14 @@ struct LaTeXSourceScan {
                 case U.dollar:
                     if stack.last == .dollar {
                         stack.removeLast()
+                    } else if k + 1 < range.upperBound && units[k + 1] == U.dollar && kinds[k + 1] == .code {
+                        if stack.last == .displayDollar {
+                            stack.removeLast()
+                        } else {
+                            stack.append(.displayDollar)
+                        }
+                        k += 2
+                        continue
                     } else {
                         stack.append(.dollar)
                     }
