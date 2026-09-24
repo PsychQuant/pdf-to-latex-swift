@@ -67,9 +67,11 @@ extension PageTranscriber {
     ///    改寫引用與寬度；結果與原內容不同才寫回磁碟（寫入失敗 → `.writeFailed`，不中斷其餘頁面），
     ///    相同則 `.unchanged`，改了則 `.migrated`。
     ///
-    /// 全部處理完後，**只要 `pageNumbers` 不是空的**（即使沒有任何一頁真的被改寫），就用
-    /// `tex/` 目錄裡**所有**既有頁面（不是只有這次要求遷移的 `pageNumbers` 子集）重建
-    /// `accumulated.tex`（`rebuildAccumulated`）——理由見下方兩點。
+    /// 全部處理完後，**只要 `pageNumbers` 不是空的、且 `tex/` 目錄裡確實找得到至少一頁**
+    /// （即使沒有任何一頁真的被改寫），就用 `tex/` 目錄裡**所有**既有頁面（不是只有這次要求遷移
+    /// 的 `pageNumbers` 子集）重建 `accumulated.tex`（`rebuildAccumulated`）——理由見下方兩點。
+    /// `tex/` 目錄裡一頁都找不到時**完全不碰** `accumulated.tex`（見下方「所有既有頁面」一節結尾），
+    /// 不會覆寫掉可能還完好的既有總文件。
     ///
     /// ### 為什麼是「所有既有頁面」而不是 `pageNumbers`
     ///
@@ -77,6 +79,14 @@ extension PageTranscriber {
     /// 會被覆寫成只剩第 5 頁的內容，把專案其他頁面靜默地從總文件裡刪掉——即使那些頁面的
     /// `tex/page-NNNN.tex` 本身完好無缺。`allExistingPageNumbers(texDir:)` 直接掃 `tex/` 目錄找出
     /// 專案實際擁有的全部頁面，重建永遠涵蓋整份文件。
+    ///
+    /// **這份清單本身是空的（`tex/` 不存在，或存在但沒有任何檔名符合 `page-NNNN.tex` 的檔案）
+    /// 時，直接跳過整個重建，不寫 `accumulated.tex`**（協調者加審的第四輪 Codex 審查）：這代表
+    /// 專案目前完全沒有可以組成總文件的頁面來源，可能是全新專案（本來就沒有 `accumulated.tex`
+    /// 可覆寫，跳過無傷）、也可能是 `tex/` 被移走或還沒從備份還原（這時候多半還留著上一次完整
+    /// 的 `accumulated.tex`，寫一份空的上去會是真正的資料遺失）。兩種情況「不重建」都是安全的
+    /// 選擇；呼叫端已經能從逐頁 `outcomes` 看出沒有任何一頁被處理，不需要另外的封閉列舉再說一次
+    /// 同一件事。
     ///
     /// ### 為什麼是「不管有沒有改寫」都重建
     ///
@@ -140,12 +150,18 @@ extension PageTranscriber {
             }
         }
 
+        // allPages 空的話（tex/ 真的不存在，或存在但一個符合 page-NNNN.tex 格式的檔案都沒有）
+        // 完全不碰 accumulated.tex——沒有任何頁面可以重建，寫出一份空文件只會覆寫掉可能還完好的
+        // 既有總文件（協調者加審的第四輪 Codex 審查：tex/ 被移走或尚未從備份還原時，
+        // accumulated.tex 可能還留著上一次的完整內容，這時候「不重建」比「重建成空的」安全）。
         if !pageNumbers.isEmpty {
             let allPages = try Self.allExistingPageNumbers(texDir: texDir)
-            let rebuilt = rebuildAccumulated(pageNumbers: allPages, texDir: texDir, projectRoot: project.root)
-            try rebuilt.write(
-                to: project.root.appendingPathComponent("accumulated.tex"), atomically: true, encoding: .utf8
-            )
+            if !allPages.isEmpty {
+                let rebuilt = try rebuildAccumulated(pageNumbers: allPages, texDir: texDir, projectRoot: project.root)
+                try rebuilt.write(
+                    to: project.root.appendingPathComponent("accumulated.tex"), atomically: true, encoding: .utf8
+                )
+            }
         }
 
         return outcomes

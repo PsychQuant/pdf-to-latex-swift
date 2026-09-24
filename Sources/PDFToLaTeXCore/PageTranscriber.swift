@@ -50,7 +50,7 @@ public struct PageTranscriber: Sendable {
 
         guard !pendingPages.isEmpty else {
             // 即使沒有新頁面要轉，也重建 accumulated.tex 確保一致
-            let accumulated = rebuildAccumulated(pageNumbers: pageNumbers, texDir: texDir, projectRoot: project.root)
+            let accumulated = try rebuildAccumulated(pageNumbers: pageNumbers, texDir: texDir, projectRoot: project.root)
             try accumulated.write(to: accumulatedURL, atomically: true, encoding: .utf8)
             print("所有頁面已轉寫完成。")
             return []
@@ -204,7 +204,7 @@ public struct PageTranscriber: Sendable {
             try updatePreambleIfNeeded(projectRoot: project.root, texDir: texDir, pageNumbers: pageNumbers)
 
             // 4. 每批完成後重建 accumulated.tex
-            let updatedAccumulated = rebuildAccumulated(pageNumbers: pageNumbers, texDir: texDir, projectRoot: project.root)
+            let updatedAccumulated = try rebuildAccumulated(pageNumbers: pageNumbers, texDir: texDir, projectRoot: project.root)
             try updatedAccumulated.write(to: accumulatedURL, atomically: true, encoding: .utf8)
 
             // Update manifest
@@ -343,17 +343,24 @@ public struct PageTranscriber: Sendable {
     /// 包含 preamble（\\input{preamble}）和 \\end{document}。
     /// 不是 `private`：`FigureCropMigration`（PsychQuant/pdf-to-latex-swift#222）重用同一份重建規則，
     /// 遷移改寫 tex/page-NNNN.tex 之後也要用它重建 accumulated.tex，不重寫一份。
-    func rebuildAccumulated(pageNumbers: [Int], texDir: URL, projectRoot: URL) -> String {
+    ///
+    /// `pageNumbers` 裡任何一頁讀不到就整個 throw，不會靜默跳過那一頁、產出一份缺頁卻看起來完整
+    /// 的總文件（協調者加審的第四輪 Codex 審查：`migrateFigureCrops` 的 `allPages` 來自目錄列舉，
+    /// 列舉當下檔案存在，不保證讀取當下仍然存在或可讀——若靜默跳過，寫出來的
+    /// `accumulated.tex` 會比列舉到的頁面還少，呼叫端毫無所覺）。`transcribe()` 呼叫這個函式時，
+    /// `pageNumbers` 裡的每一頁本來就已經被 `ensurePlaceholders` 保證有檔案（真正轉寫的內容或
+    /// 佔位檔），正常流程下不會觸發這個 throw；會觸發代表檔案在兩次呼叫之間被外部刪除或权限
+    /// 出了問題，這種情況下讓呼叫端知道，好過安靜生出一份缺頁的文件。
+    func rebuildAccumulated(pageNumbers: [Int], texDir: URL, projectRoot: URL) throws -> String {
         var body = ""
         for page in pageNumbers {
             let texURL = texDir.appendingPathComponent(String(format: "page-%04d.tex", page))
-            if let content = try? String(contentsOf: texURL, encoding: .utf8) {
-                // per-page 檔案可能已自帶 header，直接串接即可
-                if content.hasPrefix("%% ===") {
-                    body += "\n" + content + "\n"
-                } else {
-                    body += "\n%% === Page \(page) ===\n" + content + "\n"
-                }
+            let content = try String(contentsOf: texURL, encoding: .utf8)
+            // per-page 檔案可能已自帶 header，直接串接即可
+            if content.hasPrefix("%% ===") {
+                body += "\n" + content + "\n"
+            } else {
+                body += "\n%% === Page \(page) ===\n" + content + "\n"
             }
         }
 

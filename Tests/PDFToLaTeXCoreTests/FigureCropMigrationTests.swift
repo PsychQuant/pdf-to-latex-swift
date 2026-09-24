@@ -423,4 +423,39 @@ final class FigureCropMigrationTests: XCTestCase {
         )
         XCTAssertEqual(afterFailure, goodAccumulated, "存取被拒時不該把 accumulated.tex 換成空內容")
     }
+
+    // MARK: - 協調者加審的第四輪 Codex 回歸：tex/ 真的不存在（合法空狀態）也不能覆寫既有總文件
+
+    /// `tex/` 整個消失（被搬走、還沒從備份還原——這是「合法空狀態」，會被
+    /// `.fileReadNoSuchFile` 接住、不會 throw）時，若 accumulated.tex 還留著上一次完整的內容，
+    /// 不能因為這次列舉不到任何頁面就把它覆寫成空的——這比「不重建」還糟，且不需要任何權限
+    /// 錯誤就能發生。
+    func testMissingTexDirectoryDoesNotOverwriteExistingGoodAccumulated() throws {
+        let image = try writePageImage(page: 5, color: Self.red)
+        try writePageTex(page: 5, content: "\\includegraphics{figures/fig1.png}")
+        try writeResponses([PageResult(
+            page: 5, latex: "", figures: [FigureRegion(id: "fig1", bbox: [0.1, 0.1, 0.4, 0.3], caption: nil)],
+            confidence: nil, notes: nil
+        )])
+        let project = makeProject(pages: [
+            PageRecord(number: 5, width: 612, height: 792, rotation: 0, renderedImagePath: image, renderedDPI: nil),
+        ])
+        let transcriber = PageTranscriber()
+        _ = try transcriber.migrateFigureCrops(project: project, pageNumbers: [5])
+        let goodAccumulated = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertFalse(goodAccumulated.isEmpty)
+
+        // 模擬 tex/ 整個被搬走／還沒還原：直接刪掉整個目錄（不是模擬存取失敗，是真的不存在）。
+        try FileManager.default.removeItem(at: projectDir.appendingPathComponent("tex"))
+
+        let outcomes = try transcriber.migrateFigureCrops(project: project, pageNumbers: [5])
+        XCTAssertEqual(outcomes, [FigureMigrationOutcome(page: 5, kind: .noPageTexFile)])
+
+        let afterMissingTexDir = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertEqual(afterMissingTexDir, goodAccumulated, "tex/ 整個消失時不該把 accumulated.tex 覆寫成空內容")
+    }
 }
