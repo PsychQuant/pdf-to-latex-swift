@@ -443,4 +443,35 @@ final class PageTranscriberFigureTests: XCTestCase {
             "裁出來的內容必須來自第 7 頁自己的圖（藍），不是批次第一張（紅）: \(cropped.color)"
         )
     }
+
+    // MARK: - rebuildAccumulated：任一頁讀不到要整個 throw（協調者加審的第四輪 Codex 審查）
+
+    /// `pageNumbers` 裡任一頁對應的 `tex/page-NNNN.tex` 讀不到（不存在、權限、編碼問題皆同一類）
+    /// 時要整個 throw，不能靜默跳過那一頁、產出一份缺頁卻看起來完整的總文件——
+    /// `migrateFigureCrops` 的 `allPages` 來自目錄列舉，列舉當下檔案存在不保證讀取當下仍然存在，
+    /// 若靜默跳過，寫出來的 accumulated.tex 會比列舉到的頁面還少，呼叫端毫無所覺。
+    func testRebuildAccumulatedThrowsWhenAPageCannotBeRead() throws {
+        let texDir = projectDir.appendingPathComponent("tex")
+        try FileManager.default.createDirectory(at: texDir, withIntermediateDirectories: true)
+        try "Page one.".write(to: texDir.appendingPathComponent("page-0001.tex"), atomically: true, encoding: .utf8)
+        // page-0002.tex 故意不存在，模擬「列舉到但讀取時已經不在」。
+
+        XCTAssertThrowsError(
+            try PageTranscriber().rebuildAccumulated(pageNumbers: [1, 2], texDir: texDir, projectRoot: projectDir)
+        )
+    }
+
+    /// 正常情況（每一頁都讀得到）仍要維持原本的重建結果。
+    func testRebuildAccumulatedSucceedsWhenAllPagesAreReadable() throws {
+        let texDir = projectDir.appendingPathComponent("tex")
+        try FileManager.default.createDirectory(at: texDir, withIntermediateDirectories: true)
+        try "Page one.".write(to: texDir.appendingPathComponent("page-0001.tex"), atomically: true, encoding: .utf8)
+        try "Page two.".write(to: texDir.appendingPathComponent("page-0002.tex"), atomically: true, encoding: .utf8)
+
+        let result = try PageTranscriber().rebuildAccumulated(
+            pageNumbers: [1, 2], texDir: texDir, projectRoot: projectDir
+        )
+        XCTAssertTrue(result.contains("Page one."))
+        XCTAssertTrue(result.contains("Page two."))
+    }
 }
