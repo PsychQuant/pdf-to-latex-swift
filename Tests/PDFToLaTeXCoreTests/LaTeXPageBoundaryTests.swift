@@ -191,13 +191,21 @@ final class LaTeXPageBoundaryTests: XCTestCase {
         XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input)
     }
 
+    /// 兩段各自完整的 `$$…$$` 展示數學夾著分頁：頁尾的 `$$` 是結尾、頁首的 `$$` 是開頭（Codex R3 HIGH）。
+    /// `$$` 是一個展示數學分隔字元，單獨一行不自成一體；刪掉它，pdflatex 實測為 `! Missing $ inserted.`
+    func testDedup_displayMathDelimitersAreNotDuplicates() {
+        let input = "\\documentclass{article}\n\\begin{document}\n$$\nx\n$$\n%% === Page 2 ===\n$$\ny\n$$\n\\end{document}"
+        let normalizer = LaTeXNormalizer()
+        XCTAssertEqual(normalizer.removeCrossPageDuplicates(input), input)
+    }
+
     /// 只刪「自身配對完整」的重疊段落：段落裡有未配對的結構（封閉列舉：大括號、`\\begin`／`\\end`、
     /// `\\[`／`\\]`、`\\(`／`\\)`、`$` 的奇偶、`\\begingroup`／`\\endgroup`、`\\bgroup`／`\\egroup`、
     /// `\\left`／`\\right`、`\\if…`／`\\fi`），刪掉它就會改變其他地方的配對，所以不刪。
     func testDedup_onlySelfBalancedOverlapsAreDeleted() {
         let unbalanced = [
             "}", "\\end{center}", "\\]", "\\)", "$x = 1", "\\fi", "\\right)", "\\endgroup", "\\egroup",
-            "{\\bfseries", "\\begin{center}", "\\ifdim\\x>0pt", "\\left(", "\\[", "} {",
+            "{\\bfseries", "\\begin{center}", "\\ifdim\\x>0pt", "\\left(", "\\[", "} {", "$$", "$$ x", "x $$ y $",
         ]
         for line in unbalanced {
             let input = "\\begin{document}\nOpening.\n\(line)\n%% === Page 2 ===\n\(line)\nClosing.\n\\end{document}"
@@ -210,6 +218,8 @@ final class LaTeXPageBoundaryTests: XCTestCase {
             ["\\[", "x = 1", "\\]"],
             ["Price $x$ and {\\bfseries bold}.", "\\left( y \\right)"],
             ["\\ifdim\\x>0pt A\\else B\\fi"],
+            ["$$", "x = 1", "$$"],
+            ["$a$$b$ and $$c$$"],
         ]
         for block in balanced {
             let joined = block.joined(separator: "\n")
@@ -293,7 +303,7 @@ final class LaTeXPageBoundaryTests: XCTestCase {
     /// 重複率高的行，加上會讓舊版誤判的 verbatim 片段（內含假 marker、`\end{itemize}`、`\item`）。
     private static let fuzzLines = [
         "Text A.", "Text B.", "Text A.", "\\centering", "\\end{table}", "\\begin{itemize}", "\\end{itemize}",
-        "\\item X", "\\item Y", "", "%% note", "% plain comment", "  Text A.  ", "}", "{\\bfseries", "$x$",
+        "\\item X", "\\item Y", "", "%% note", "% plain comment", "  Text A.  ", "}", "{\\bfseries", "$x$", "$$",
         "\\begin{verbatim}\nText A.\n%% === Page 50 ===\nText A.\n\\end{verbatim}",
         "\\begin{comment}\n\\end{itemize}\n%% === Page 51 ===\n\\item Z\n\\end{comment}",
         "\\begin{Verbatim}\n\\end{itemize}\n\\end{Verbatim}",
