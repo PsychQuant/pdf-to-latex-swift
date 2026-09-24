@@ -112,60 +112,75 @@ public struct LaTeXNormalizer: Sendable {
         return result
     }
 
-    /// 移除跨頁邊界的重複行。AI 逐頁轉寫時常在頁尾/頁首產生相同內容。
+    /// 移除跨頁邊界的重複行。AI 逐頁轉寫時常把前一頁最後幾行在下一頁開頭又寫一次。
+    ///
+    /// ## 分頁邊界（PsychQuant/macdoc#215）
+    ///
+    /// 只認 `LaTeXSourceScan.markerLines`：整行恰好是 `%% === Page N ===`，且那個 `%` 是註解起點、
+    /// 不在巨集定義內。verbatim 類環境、`\verb`、其他註解中間長得像 marker 的文字不是邊界。
+    ///
+    /// ## 比對（PsychQuant/macdoc#3）
+    ///
+    /// 每個邊界比較前一頁的「頁尾」與下一頁的「頁首」：頁尾是邊界之前、上一個邊界之後最後
+    /// `windowSize` 個可比對行；頁首是邊界之後、下一個邊界之前最前面 `windowSize` 個可比對行。
+    /// 頁尾的最後 k 行與頁首的前 k 行逐行相同（去掉頭尾空格、tab 與 CR 後比較）時，取最大的 k，
+    /// 刪除頁首那 k 行，再重新比較，直到沒有重疊。只有「連續的一段」重疊才算重複：頁首某一行只是
+    /// 在頁尾出現過（例如 `\centering`、`\end{table}`）不刪。
+    ///
+    /// 可比對行（封閉列舉，三個條件都要成立）：
+    /// 1. 去掉頭尾空格、tab 與 CR 後非空；
+    /// 2. 不以 `%%` 開頭（marker 與轉寫註記）；
+    /// 3. 不碰到 verbatim（`LaTeXSourceScan.lineTouchesVerbatim`）：`\begin{verbatim}` 那一行、
+    ///    verbatim 內容、`\end{verbatim}` 那一行、含 `\verb` 的行。刪掉其中任何一行都可能讓
+    ///    verbatim 提早結束或吞掉後文，所以這些行既不比對、也不刪。
+    ///
+    /// 不可比對的行不刪、也不打斷比對（夾在重複行之間的空行與註解保留在原位）。
+    ///
+    /// ## 冪等
+    ///
+    /// 只刪頁首的行，邊界依序處理：處理某個邊界時，前一頁（頁尾所在）已經定案，而每個邊界都刪到
+    /// 沒有重疊為止，所以第二輪不會再刪。
     func removeCrossPageDuplicates(_ source: String, windowSize: Int = 5) -> String {
+        guard windowSize > 0, source.contains("===") else { return source }
+        let scan = LaTeXSourceScan(source)
+        let boundaries = scan.markerLines
+        guard !boundaries.isEmpty else { return source }
+
+        // scan 的行與以 LF 切開的行一一對應（lineStarts 也只以 LF 分行）。
         let lines = source.components(separatedBy: "\n")
-        guard lines.count > windowSize * 2 else { return source }
+        let blanks = CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\r"))
+        let keys = lines.map { $0.trimmingCharacters(in: blanks) }
+        let comparable = lines.indices.map { index in
+            !keys[index].isEmpty && !keys[index].hasPrefix("%%") && !scan.lineTouchesVerbatim(index)
+        }
 
-        // 找出 page markers 的位置
-        let pagePattern = #"%%\s*===\s*Page\s+\d+\s*==="#
-        guard let pageRegex = try? NSRegularExpression(pattern: pagePattern) else { return source }
+        var removed = Set<Int>()
+        for (position, boundary) in boundaries.enumerated() {
+            let pageStart = position > 0 ? boundaries[position - 1] + 1 : 0
+            let nextBoundary = position + 1 < boundaries.count ? boundaries[position + 1] : lines.count
+            let tail = Array((pageStart..<boundary).filter { comparable[$0] && !removed.contains($0) }.suffix(windowSize))
 
-        var pageBoundaries: [Int] = []
-        for (i, line) in lines.enumerated() {
-            let ns = line as NSString
-            if pageRegex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) != nil {
-                pageBoundaries.append(i)
+            while true {
+                let head = Array(((boundary + 1)..<nextBoundary).lazy
+                    .filter { comparable[$0] && !removed.contains($0) }
+                    .prefix(windowSize))
+                let overlap = stride(from: min(tail.count, head.count), through: 1, by: -1).first { k in
+                    zip(tail.suffix(k), head.prefix(k)).allSatisfy { keys[$0] == keys[$1] }
+                } ?? 0
+                guard overlap > 0 else { break }
+                removed.formUnion(head.prefix(overlap))
             }
         }
 
-        guard !pageBoundaries.isEmpty else { return source }
-
-        // 在每個 page boundary，比較前後 windowSize 行是否重複
-        var linesToRemove = Set<Int>()
-
-        for boundary in pageBoundaries {
-            let beforeStart = max(0, boundary - windowSize)
-            let afterEnd = min(lines.count, boundary + windowSize + 1)
-
-            let beforeLines = Array(lines[beforeStart..<boundary])
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty && !$0.hasPrefix("%%") }
-
-            let afterLines = Array(lines[(boundary + 1)..<afterEnd])
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty && !$0.hasPrefix("%%") }
-
-            // 找出 afterLines 中與 beforeLines 末尾重複的行
-            for (j, afterLine) in afterLines.enumerated() {
-                if beforeLines.contains(where: { $0 == afterLine }) {
-                    let actualIndex = boundary + 1 + j
-                    if actualIndex < lines.count {
-                        let trimmed = lines[actualIndex].trimmingCharacters(in: .whitespaces)
-                        if trimmed == afterLine {
-                            linesToRemove.insert(actualIndex)
-                        }
-                    }
-                }
-            }
-        }
-
-        guard !linesToRemove.isEmpty else { return source }
-
-        return lines.enumerated()
-            .filter { !linesToRemove.contains($0.offset) }
-            .map { $0.element }
+        guard !removed.isEmpty else { return source }
+        let result = lines.enumerated()
+            .filter { !removed.contains($0.offset) }
+            .map(\.element)
             .joined(separator: "\n")
+        // 安全網：刪掉的行都不碰到 verbatim，但刪行仍可能改變後文的判定（例如 `\begin% c` 那一行被刪，
+        // 下一行的 `{verbatim}` 就不再是環境名稱）。verbatim 有任何變化就整份不動。
+        guard LaTeXSourceScan(result).verbatimSegments == scan.verbatimSegments else { return source }
+        return result
     }
 
     /// 跳脫貨幣符號 $（非數學模式的 $）。
@@ -1247,9 +1262,24 @@ public struct LaTeXNormalizer: Sendable {
     /// 偵測 \end{enumerate/itemize} 後接頁面標記再接 \item 的模式，
     /// 移除過早的 \end{...} 並在孤立 items 後補上正確的結束標記。
     /// 冪等：已正確配對的環境不會被修改。
+    ///
+    /// 頁面標記只認 `LaTeXSourceScan.markerLines`（PsychQuant/macdoc#215）；verbatim 類環境與
+    /// `\verb` 裡長得像 marker 的文字不是分頁。verbatim 的位元組一律不動：
+    /// - 過早的 `\end{...}` 那一行、以及判定「已有結束標記」的 `\end{...}` 那一行，都必須不碰到
+    ///   verbatim（`LaTeXSourceScan.lineTouchesVerbatim`）；
+    /// - 略過的空行必須不碰到 verbatim；
+    /// - 需要補上 `\end{...}` 而最後一個孤立 item 的行尾換行是 verbatim（例如該行以 `\verb` 結尾，
+    ///   下一行是它的內容）時，插入會落進 verbatim 內容：這一處整個不修正（也不刪過早的 `\end`）。
     public static func fixSplitListEnvironments(_ source: String) -> String {
         let lines = source.components(separatedBy: "\n")
-        let pagePattern = #"%%\s*===\s*Page\s+\d+\s*==="#
+        // scan 的行與以 LF 切開的行一一對應。
+        let scan = LaTeXSourceScan(source)
+        let markerLines = Set(scan.markerLines)
+        /// 空行或 page marker 行，且不碰到 verbatim。
+        func isSkippable(_ index: Int) -> Bool {
+            guard !scan.lineTouchesVerbatim(index) else { return false }
+            return markerLines.contains(index) || lines[index].trimmingCharacters(in: .whitespaces).isEmpty
+        }
 
         // 第一遍：找出需要移除的 \end{...} 行索引和需要插入 \end{...} 的位置
         struct SplitFix {
@@ -1264,21 +1294,16 @@ public struct LaTeXNormalizer: Sendable {
         while i < lines.count {
             let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
 
-            // 偵測 \end{enumerate} 或 \end{itemize}
+            // 偵測 \end{enumerate} 或 \end{itemize}（不碰到 verbatim 的那一行才算）
             var envType: String? = nil
             if trimmed == "\\end{enumerate}" { envType = "enumerate" }
             else if trimmed == "\\end{itemize}" { envType = "itemize" }
 
-            if let env = envType {
+            if let env = envType, !scan.lineTouchesVerbatim(i) {
                 // 往後掃描：跳過空行和頁面標記
                 var j = i + 1
-                while j < lines.count {
-                    let next = lines[j].trimmingCharacters(in: .whitespaces)
-                    if next.isEmpty || next.range(of: pagePattern, options: .regularExpression) != nil {
-                        j += 1
-                    } else {
-                        break
-                    }
+                while j < lines.count && isSkippable(j) {
+                    j += 1
                 }
 
                 // 下一個非空行是否以 \item 開頭？
@@ -1291,7 +1316,7 @@ public struct LaTeXNormalizer: Sendable {
                         if kTrimmed.hasPrefix("\\item") {
                             lastItemLine = k
                             k += 1
-                        } else if kTrimmed.isEmpty || kTrimmed.range(of: pagePattern, options: .regularExpression) != nil {
+                        } else if isSkippable(k) {
                             k += 1
                         } else {
                             break
@@ -1302,15 +1327,22 @@ public struct LaTeXNormalizer: Sendable {
                     var hasClosingEnd = false
                     var checkLine = lastItemLine + 1
                     while checkLine < lines.count {
-                        let check = lines[checkLine].trimmingCharacters(in: .whitespaces)
-                        if check.isEmpty || check.range(of: pagePattern, options: .regularExpression) != nil {
+                        if isSkippable(checkLine) {
                             checkLine += 1
                             continue
                         }
-                        if check == "\\end{\(env)}" {
+                        let check = lines[checkLine].trimmingCharacters(in: .whitespaces)
+                        if check == "\\end{\(env)}" && !scan.lineTouchesVerbatim(checkLine) {
                             hasClosingEnd = true
                         }
                         break
+                    }
+
+                    // 補上的 \end{...} 會落在最後一個孤立 item 的行尾換行之後；那個換行若是 verbatim，
+                    // 插入就改到 verbatim 內容：整處不修正。
+                    if !hasClosingEnd && scan.lineEndIsVerbatim(lastItemLine) {
+                        i += 1
+                        continue
                     }
 
                     fixes.append(SplitFix(
@@ -1336,7 +1368,10 @@ public struct LaTeXNormalizer: Sendable {
             resultLines.remove(at: fix.removeEndLine)
         }
 
-        return resultLines.joined(separator: "\n")
+        let result = resultLines.joined(separator: "\n")
+        // 安全網：與 removeCrossPageDuplicates 相同，verbatim 有任何變化就整份不動。
+        guard LaTeXSourceScan(result).verbatimSegments == scan.verbatimSegments else { return source }
+        return result
     }
 
     // MARK: - End Document
