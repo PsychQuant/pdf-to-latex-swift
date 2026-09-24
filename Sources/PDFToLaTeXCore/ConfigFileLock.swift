@@ -17,7 +17,9 @@ import Foundation
 /// **Protocol — this MUST stay byte-for-byte identical between the two
 /// implementations, or the lock stops protecting anything:**
 /// - Lock file path: `<config path>.lock` (sibling of the config file).
-/// - Open with `O_CREAT | O_RDWR | O_CLOEXEC`, mode `0o600`.
+/// - Open with `O_CREAT | O_RDWR | O_CLOEXEC`, mode `0o600`, then
+///   `fchmod(fd, 0o600)`; a failing `fchmod` is thrown with its errno
+///   before any lock attempt.
 /// - Acquire with `flock(fd, LOCK_EX | LOCK_NB)`, polled every 50 ms.
 /// - Give up and throw after 5 seconds of polling, measured on a monotonic
 ///   clock. Only EWOULDBLOCK/EAGAIN (contention) is polled and EINTR
@@ -52,6 +54,7 @@ enum ConfigFileLock {
         pollInterval: TimeInterval = ConfigFileLock.defaultPollInterval,
         timeout: TimeInterval = ConfigFileLock.defaultTimeout,
         acquire: (Int32, Int32) -> Int32 = { flock($0, $1) },
+        setMode: (Int32, mode_t) -> Int32 = { fchmod($0, $1) },
         _ body: () throws -> T
     ) throws -> T {
         let lockPath = path + ".lock"
@@ -64,8 +67,14 @@ enum ConfigFileLock {
         }
         defer { close(fd) }
         // Guarantee 0600 regardless of the caller's umask; the mode passed
-        // to open() above is only a request, not a guarantee.
-        _ = fchmod(fd, 0o600)
+        // to open() above is only a request, not a guarantee. Refuse (the
+        // deferred close still runs) if that fails.
+        guard setMode(fd, 0o600) == 0 else {
+            let code = errno
+            throw NSError(
+                domain: "PDFToLaTeXCore.ConfigFileLock", code: Int(code),
+                userInfo: [NSLocalizedDescriptionKey: "無法把鎖檔設為 0600: \(lockPath)（errno \(code)）"])
+        }
 
         // The budget runs on a monotonic clock: a wall-clock change cannot
         // stretch or cut the wait.
