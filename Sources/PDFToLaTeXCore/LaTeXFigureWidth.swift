@@ -86,7 +86,9 @@ extension LaTeXNormalizer {
     ///
     /// ## 既有選項的合併規則
     ///
-    /// - 選項 key 由去掉註解後的文字、以大括號外的逗號切分而得（`trim={1, 2, 3, 4}` 是一個選項）。
+    /// - 選項 key 由 TeX 語意的程式碼文字（`LaTeXSourceScan.texCodeText`：註解連同換行與下一行
+    ///   開頭空白一起消失，pdflatex 實測 `[wid%⏎    th=3cm]` 的 key 是 width）、以大括號外的逗號
+    ///   切分而得（`trim={1, 2, 3, 4}` 是一個選項）。路徑也用同一個程式碼文字比對。
     ///   含 `explicitSizeOptionKeys` 任一 key → 整個呼叫逐位元組保留，回報 `explicitSizePreserved`
     ///   （使用者寫的尺寸優先，即使與 bbox 不符）。寫在註解裡的 `width=` 不算。
     /// - 否則把 `width=<w>\textwidth` 加在選項**最後一個程式碼字元之後**（必要時先補逗號），
@@ -404,12 +406,12 @@ extension LaTeXNormalizer {
             guard let pathEnd = scan.groupEnd(from: k) else { continue }
             let pathRange = (k + 1)..<(pathEnd - 1)
 
-            var normalized = scan.codeText(pathRange).trimmingCharacters(in: .whitespacesAndNewlines)
+            var normalized = scan.texCodeText(pathRange).trimmingCharacters(in: .whitespacesAndNewlines)
             while normalized.hasPrefix("./") { normalized.removeFirst(2) }
             guard normalized.hasPrefix("figures/") else { continue }
 
             let hasExplicitSize = optionsRange.map {
-                optionKeys(scan.codeText($0)).contains { explicitSizeOptionKeys.contains($0) }
+                optionKeys(scan.texCodeText($0)).contains { explicitSizeOptionKeys.contains($0) }
             } ?? false
 
             let insertionOffset: Int

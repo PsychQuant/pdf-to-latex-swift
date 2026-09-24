@@ -463,6 +463,26 @@ final class LaTeXFigureWidthTests: XCTestCase {
         }
     }
 
+    /// pdflatex 實測（B3）：`wid%⏎    th=3cm` 的 key 是 width（寬 85.35826pt = 3cm）。
+    func testKeySplitAcrossACommentIsRecognized() throws {
+        try writeSpecExample()
+        let source = "%% === Page 12 ===\n\\includegraphics[wid% note\n    th=3cm]{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.first?.outcome, .explicitSizePreserved)
+    }
+
+    /// pdflatex 實測（B3）：路徑跨註解仍是同一個檔名。
+    func testPathSplitAcrossACommentIsRecognized() throws {
+        try writeSpecExample()
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-% note\n      fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[width=0.68\\textwidth]{figures/p012-% note\n      fig01.png}")
+        guard case .widthApplied = report.resolutions.first?.outcome else {
+            return XCTFail("expected widthApplied, got \(String(describing: report.resolutions.first?.outcome))")
+        }
+    }
+
     func testCommentBetweenCommandAndPathGetsBracketsBeforeTheComment() throws {
         try writeSpecExample()
         let source = "%% === Page 12 ===\n\\includegraphics% note\n{figures/p012-fig01.png}"
