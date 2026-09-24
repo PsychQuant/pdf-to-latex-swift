@@ -102,6 +102,77 @@ final class LaTeXSourceScanTests: XCTestCase {
         XCTAssertEqual(executedSwitches(verbatimAroundListing), ["mainmatter"])
     }
 
+    // MARK: - Per-environment termination (pdflatex-verified, round 4)
+
+    /// comment 套件：只有「整行恰好是 `\end{comment}`」才結束（行尾空格可、tab 不可、CRLF 可）。
+    func testCommentEnvironmentEndsOnlyOnItsOwnLine() {
+        let notEnding = [
+            "Example: \\end{comment}",
+            "   \\end{comment}",
+            "\\end{comment}\\typeout{x}",
+            "\\end{comment} tail text",
+            "\\end{comment}\t",
+            "\\end {comment}",
+        ]
+        for line in notEnding {
+            let source = "\\begin{comment}\n\(line)\n\\frontmatter\n%% === Page 99 ===\n\\mainmatter"
+            XCTAssertEqual(executedSwitches(source), [], line.debugDescription)
+        }
+        XCTAssertEqual(executedSwitches("\\begin{comment}\nx\n\\end{comment}\n\\mainmatter"), ["mainmatter"])
+        XCTAssertEqual(executedSwitches("\\begin{comment}\nx\n\\end{comment}   \n\\mainmatter"), ["mainmatter"])
+        XCTAssertEqual(executedSwitches("\\begin{comment}\r\nx\r\n\\end{comment}\r\n\\mainmatter"), ["mainmatter"])
+        // 開始那一行其餘的文字不會被執行。
+        XCTAssertEqual(executedSwitches("\\begin{comment}\\frontmatter\nx\n\\end{comment}\n\\mainmatter"), ["mainmatter"])
+    }
+
+    /// kernel verbatim、verbatim*、listings：第一個字面 `\end{env}`（行中也算）結束，同行其後的文字會被執行。
+    /// fancyvrb Verbatim、Verbatim*、minted：同樣在行中結束，但同行其後的文字被丟棄（FancyVerb Error）。
+    func testLiteralEndAnywhereAndWhatHappensToTheRestOfThatLine() {
+        let tailExecuted: [(begin: String, end: String)] = [
+            ("\\begin{verbatim}", "\\end{verbatim}"),
+            ("\\begin{verbatim*}", "\\end{verbatim*}"),
+            ("\\begin{lstlisting}", "\\end{lstlisting}"),
+        ]
+        let tailDropped: [(begin: String, end: String)] = [
+            ("\\begin{Verbatim}", "\\end{Verbatim}"),
+            ("\\begin{Verbatim*}", "\\end{Verbatim*}"),
+            ("\\begin{minted}{text}", "\\end{minted}"),
+        ]
+        for env in tailExecuted + tailDropped {
+            let midLine = "\(env.begin)\n\\frontmatter\nExample: \(env.end)\n\\mainmatter"
+            XCTAssertEqual(executedSwitches(midLine), ["mainmatter"], env.begin)
+        }
+        for env in tailExecuted {
+            let tail = "\(env.begin)\nx\n\(env.end)\\frontmatter\n\\mainmatter"
+            XCTAssertEqual(executedSwitches(tail), ["frontmatter", "mainmatter"], env.begin)
+        }
+        for env in tailDropped {
+            let tail = "\(env.begin)\nx\n\(env.end)\\frontmatter\n\\mainmatter"
+            XCTAssertEqual(executedSwitches(tail), ["mainmatter"], env.begin)
+        }
+    }
+
+    // MARK: - \let right-hand side (pdflatex-verified, round 4)
+
+    func testLetRightHandSideFollowsTeXTokenRules() {
+        let assigned = [
+            "\\let\\saved% note\n\\frontmatter",       // L1
+            "\\let\\saved\n\\frontmatter",             // L2
+            "\\let\\saved=\\frontmatter",              // L3
+            "\\let\\saved = \\frontmatter",            // L4
+            "\\let\\saved =\n   \\frontmatter",        // L5
+            "\\let\\saved = % note\n   \\frontmatter", // L6
+            "\\let% note\n\\saved\\frontmatter",       // L9
+        ]
+        for source in assigned {
+            XCTAssertEqual(executedSwitches(source + "\n\\mainmatter"), ["mainmatter"], source.debugDescription)
+        }
+        // L7／L8：空行產生 \par，被指派的是 \par，\frontmatter 會執行。
+        for source in ["\\let\\saved\n\n\\frontmatter", "\\let\\saved =\n\n\\frontmatter"] {
+            XCTAssertEqual(executedSwitches(source), ["frontmatter"], source.debugDescription)
+        }
+    }
+
     // MARK: - TeX comment semantics in the code view (pdflatex-verified)
 
     func testCommentConsumesNewlineAndNextLineLeadingBlanks() {

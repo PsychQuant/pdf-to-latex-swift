@@ -7,9 +7,9 @@ import Foundation
 ///
 /// - **comment**：未跳脫的 `%` 到行尾（`\%` 是字元，不是註解）。
 /// - **verbatim**（封閉列舉，只有這些）：`verbatim`、`verbatim*`、`Verbatim`、`Verbatim*`、
-///   `lstlisting`、`minted`、`comment` 環境的內容（到字面上的 `\end{<env>}` 為止；找不到則到檔尾。
-///   pdflatex 實測：`\end {verbatim}`、`\end%⏎{verbatim}` 都不會結束 verbatim），以及 inline
-///   `\verb`／`\verb*`（分隔字元規則見 `verbEnd`）。
+///   `lstlisting`、`minted`、`comment` 環境的內容（結束規則因環境而異，見 `VerbatimTermination`；
+///   開始那一行 `\begin{env}` 之後的文字一律不會被執行），以及 inline `\verb`／`\verb*`
+///   （分隔字元規則見 `verbEnd`）。
 /// - **code**：其餘。
 ///
 /// 環境名稱與 document 邊界的參數用同一個讀取器（`readGroupArgument`）：`\begin`／`\end` 與
@@ -53,8 +53,29 @@ struct LaTeXSourceScan {
         let page: Int
     }
 
-    static let verbatimEnvironments: Set<String> = [
-        "verbatim", "verbatim*", "Verbatim", "Verbatim*", "lstlisting", "minted", "comment",
+    /// verbatim 類環境怎麼結束。全部以 pdflatex（TeX Live 2025；fancyvrb 4.5c、listings 1.10c、
+    /// comment、minted 3.6.0）實測決定。`\end {env}`（中間有空白）與 `\end%⏎{env}` 在所有環境都
+    /// 不會結束。
+    enum VerbatimTermination {
+        /// 第一個字面 `\end{env}`（行中也算）結束；同一行其後的文字照常執行。
+        /// kernel `verbatim`、`verbatim*`，listings `lstlisting`。
+        case literalAnywhereRestOfLineExecuted
+        /// 第一個字面 `\end{env}`（行中也算）結束；同一行其後的文字被丟棄（FancyVerb Error），不執行。
+        /// fancyvrb `Verbatim`、`Verbatim*`，minted `minted`。
+        case literalAnywhereRestOfLineDropped
+        /// 只有「整行恰好是 `\end{env}`」才結束（行首不可有空白；行尾空格被 TeX 去掉所以可以，
+        /// tab 不行；CRLF 可以）。comment 套件的 `comment`。
+        case wholeLineOnly
+    }
+
+    static let verbatimEnvironments: [String: VerbatimTermination] = [
+        "verbatim": .literalAnywhereRestOfLineExecuted,
+        "verbatim*": .literalAnywhereRestOfLineExecuted,
+        "lstlisting": .literalAnywhereRestOfLineExecuted,
+        "Verbatim": .literalAnywhereRestOfLineDropped,
+        "Verbatim*": .literalAnywhereRestOfLineDropped,
+        "minted": .literalAnywhereRestOfLineDropped,
+        "comment": .wholeLineOnly,
     ]
 
     let units: [UInt16]
@@ -317,15 +338,28 @@ struct LaTeXSourceScan {
             words.append(ControlWord(name: name, start: i, end: j))
 
             if name == "begin", let argument = readGroupArgument(units, from: j),
-               verbatimEnvironments.contains(argument.text) {
+               let termination = verbatimEnvironments[argument.text] {
                 for comment in argument.comments {
                     for k in comment { kinds[k] = .comment }
                 }
                 let contentStart = argument.range.upperBound
                 let terminator = Array("\\end{\(argument.text)}".utf16)
-                let close = find(terminator, in: units, from: contentStart) ?? n
+                let close: Int
+                switch termination {
+                case .literalAnywhereRestOfLineExecuted, .literalAnywhereRestOfLineDropped:
+                    close = find(terminator, in: units, from: contentStart) ?? n
+                case .wholeLineOnly:
+                    close = findWholeLine(terminator, in: units, after: contentStart) ?? n
+                }
                 for k in contentStart..<close { kinds[k] = .verbatim }
                 i = close
+                if termination == .literalAnywhereRestOfLineDropped && close < n {
+                    // \end{env} 本身是程式碼，同一行其後的文字被丟棄：標成 verbatim 並跳過。
+                    var lineEnd = close + terminator.count
+                    while lineEnd < n && units[lineEnd] != U.newline { lineEnd += 1 }
+                    for k in (close + terminator.count)..<lineEnd { kinds[k] = .verbatim }
+                    i = lineEnd
+                }
                 continue
             }
             i = j
@@ -448,6 +482,23 @@ struct LaTeXSourceScan {
         return nil
     }
 
+    /// `offset` 所在行之後，第一個「整行恰好是 `needle`」的行首 offset（行尾空格與 CRLF 的 `\r` 忽略）。
+    private static func findWholeLine(_ needle: [UInt16], in units: [UInt16], after offset: Int) -> Int? {
+        var lineStart = offset
+        while lineStart < units.count && units[lineStart] != U.newline { lineStart += 1 }
+        lineStart += 1
+        while lineStart < units.count {
+            var lineEnd = lineStart
+            while lineEnd < units.count && units[lineEnd] != U.newline { lineEnd += 1 }
+            var contentEnd = lineEnd
+            if contentEnd > lineStart && units[contentEnd - 1] == U.carriageReturn { contentEnd -= 1 }
+            while contentEnd > lineStart && units[contentEnd - 1] == U.space { contentEnd -= 1 }
+            if Array(units[lineStart..<contentEnd]) == needle { return lineStart }
+            lineStart = lineEnd + 1
+        }
+        return nil
+    }
+
     private static func find(_ needle: [UInt16], in units: [UInt16], from offset: Int) -> Int? {
         guard !needle.isEmpty, units.count >= needle.count else { return nil }
         var k = offset
@@ -465,7 +516,7 @@ struct LaTeXSourceScan {
         case latexCommand
         /// `\def\name<parameter text>{body}`
         case texDef
-        /// `\let\name=<token>`
+        /// `\let\name=<token>`（右側 token 的讀法見 `letAssignmentEnd`）
         case letAssignment
         /// `\NewDocumentCommand{\name}{argspec}{body}`
         case documentCommand
@@ -541,14 +592,7 @@ struct LaTeXSourceScan {
             }
             return groupEnd(from: k)
         case .letAssignment:
-            guard let name = tokenEnd(from: skipIgnorable(from: offset)) else { return nil }
-            var k = name
-            while k < units.count && (units[k] == U.space || units[k] == U.tab) { k += 1 }
-            if k < units.count && units[k] == U.equals {
-                k += 1
-                if k < units.count && units[k] == U.space { k += 1 }
-            }
-            return tokenEnd(from: k)
+            return letAssignmentEnd(after: offset)
         case .documentCommand:
             guard let name = tokenEnd(from: skipIgnorable(from: offset)),
                   let spec = group(name) else { return nil }
@@ -559,6 +603,66 @@ struct LaTeXSourceScan {
                   let begin = groupEnd(from: afterOptionals) else { return nil }
             return group(begin)
         }
+    }
+
+    /// `\let` 的兩個 token（名稱、右側）讀到哪裡。依 TeX 的語法 `\let⟨cs⟩⟨equals⟩⟨one optional space⟩⟨token⟩`，
+    /// 以 pdflatex 實測（\let\saved 之後接 \frontmatter，看 \frontmatter 有沒有被執行）：
+    ///
+    /// - 空格、tab、單一換行、註解（連同其換行）都會被略過：`\let\saved% c⏎\frontmatter`、
+    ///   `\let\saved⏎\frontmatter`、`\let\saved=\frontmatter`、`\let\saved = \frontmatter`、
+    ///   `\let\saved =⏎   \frontmatter`、`\let\saved = % c⏎   \frontmatter` 都把 `\frontmatter`
+    ///   指派給 `\saved`，不執行。
+    /// - 空行（行首狀態下的行尾）產生 `\par`：`\let\saved⏎⏎\frontmatter` 指派的是 `\par`，
+    ///   `\frontmatter` 會被執行。
+    /// - 右側是單一 token：控制序列或單一字元（`{` 也只是一個字元）。
+    private func letAssignmentEnd(after offset: Int) -> Int? {
+        /// 略過 TeX 的空白；遇到空行時回傳 `\par` 的結尾。
+        func skipSpaces(from start: Int) -> (next: Int, parEnd: Int?) {
+            var k = start
+            var atLineStart = false
+            while k < units.count {
+                let unit = units[k]
+                if unit == U.space || unit == U.tab {
+                    k += 1
+                } else if unit == U.carriageReturn && k + 1 < units.count && units[k + 1] == U.newline {
+                    k += 1
+                } else if unit == U.newline {
+                    if atLineStart { return (k, k + 1) }
+                    atLineStart = true
+                    k += 1
+                } else if unit == U.percent && kinds[k] == .comment {
+                    while k < units.count && units[k] != U.newline { k += 1 }
+                    if k < units.count { k += 1 }
+                    atLineStart = true
+                } else {
+                    break
+                }
+            }
+            return (k, nil)
+        }
+        func singleTokenEnd(_ k: Int) -> Int? {
+            guard k < units.count else { return nil }
+            guard units[k] == U.backslash else { return k + 1 }
+            var end = k + 1
+            guard end < units.count else { return nil }
+            if U.isLetter(units[end]) {
+                while end < units.count && U.isLetter(units[end]) { end += 1 }
+                return end
+            }
+            return end + 1
+        }
+
+        let beforeName = skipSpaces(from: offset)
+        if let parEnd = beforeName.parEnd { return parEnd }
+        guard let nameEnd = singleTokenEnd(beforeName.next) else { return nil }
+
+        var right = skipSpaces(from: nameEnd)
+        if let parEnd = right.parEnd { return parEnd }
+        if right.next < units.count && units[right.next] == U.equals && kinds[right.next] == .code {
+            right = skipSpaces(from: right.next + 1)
+            if let parEnd = right.parEnd { return parEnd }
+        }
+        return singleTokenEnd(right.next)
     }
 
     // MARK: - Document body
