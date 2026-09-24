@@ -54,15 +54,32 @@ extension PageTranscriber {
     ///    改寫引用與寬度；結果與原內容不同才寫回磁碟（寫入失敗 → `.writeFailed`，不中斷其餘頁面），
     ///    相同則 `.unchanged`，改了則 `.migrated`。
     ///
-    /// 全部處理完後，只要有任何一頁真的被改寫，就用與 `transcribe()` 相同的規則重建
-    /// `accumulated.tex`（`rebuildAccumulated`）。
+    /// 全部處理完後，**只要 `pageNumbers` 不是空的**（即使沒有任何一頁真的被改寫），就用
+    /// `tex/` 目錄裡**所有**既有頁面（不是只有這次要求遷移的 `pageNumbers` 子集）重建
+    /// `accumulated.tex`（`rebuildAccumulated`）——理由見下方兩點。
+    ///
+    /// ### 為什麼是「所有既有頁面」而不是 `pageNumbers`
+    ///
+    /// 只遷移一個子集（例如只有第 5 頁需要重新裁切）時，若重建只用這個子集，`accumulated.tex`
+    /// 會被覆寫成只剩第 5 頁的內容，把專案其他頁面靜默地從總文件裡刪掉——即使那些頁面的
+    /// `tex/page-NNNN.tex` 本身完好無缺。`allExistingPageNumbers(texDir:)` 直接掃 `tex/` 目錄找出
+    /// 專案實際擁有的全部頁面，重建永遠涵蓋整份文件。
+    ///
+    /// ### 為什麼是「不管有沒有改寫」都重建
+    ///
+    /// 若只在 `anyChanged` 時才重建：假設第一次呼叫時各頁的 `tex/page-NNNN.tex` 都已成功寫入
+    /// 新格式，但 `accumulated.tex` 本身寫入失敗（例如磁碟空間不足）——此時各頁已是新格式、
+    /// 但 `accumulated.tex` 仍是舊內容，兩者不一致。修好寫入障礙後重跑，這次每一頁比對出來都
+    /// 是 `.unchanged`（因為都已是新格式），`anyChanged` 永遠是 false，`accumulated.tex` 就再也
+    /// 沒有機會被修復。改成不論有沒有頁面改寫都重建，重跑永遠能把 `accumulated.tex` 校正回與
+    /// 目前所有 `tex/page-NNNN.tex` 一致的狀態。
     ///
     /// ## 冪等
     ///
     /// 重跑時每一頁的 `tex/page-NNNN.tex` 已經是新格式（帶頁碼的裁切檔名、`width=` 已寫入），
     /// `postProcessPage` 對「已經是目標格式」的呼叫不會再產生任何改寫（`rewriteFigureIncludes`
     /// 本身冪等，見 `LaTeXNormalizer.applyFigureWidths` 的文件），所以第二輪每一頁都會落在
-    /// `.unchanged`，`accumulated.tex` 也不會被重寫。
+    /// `.unchanged`；`accumulated.tex` 仍會被重建，但內容與前一輪相同（重寫、不是改寫）。
     public func migrateFigureCrops(project: ResolvedProject, pageNumbers: [Int]) throws -> [FigureMigrationOutcome] {
         let texDir = project.root.appendingPathComponent("tex", isDirectory: true)
         let responseResults = Self.loadResponsePageResults(projectDir: project.root)
@@ -72,7 +89,6 @@ extension PageTranscriber {
         }
 
         var outcomes: [FigureMigrationOutcome] = []
-        var anyChanged = false
 
         for page in pageNumbers {
             let pageTexURL = texDir.appendingPathComponent(String(format: "page-%04d.tex", page))
@@ -101,7 +117,6 @@ extension PageTranscriber {
             }
             do {
                 try processed.latex.write(to: pageTexURL, atomically: true, encoding: .utf8)
-                anyChanged = true
                 outcomes.append(FigureMigrationOutcome(
                     page: page, kind: .migrated(figuresProcessed: pageResult.figures.count), notes: processed.notes
                 ))
@@ -112,14 +127,33 @@ extension PageTranscriber {
             }
         }
 
-        if anyChanged {
-            let rebuilt = rebuildAccumulated(pageNumbers: pageNumbers, texDir: texDir, projectRoot: project.root)
+        if !pageNumbers.isEmpty {
+            let allPages = Self.allExistingPageNumbers(texDir: texDir)
+            let rebuilt = rebuildAccumulated(pageNumbers: allPages, texDir: texDir, projectRoot: project.root)
             try rebuilt.write(
                 to: project.root.appendingPathComponent("accumulated.tex"), atomically: true, encoding: .utf8
             )
         }
 
         return outcomes
+    }
+
+    /// 掃 `texDir` 底下所有 `page-NNNN.tex` 檔，回傳排序過的頁碼——專案「實際擁有」的全部頁面，
+    /// 不是這次遷移要求的子集。重建 `accumulated.tex` 一定要用這份清單，見
+    /// `migrateFigureCrops` 文件裡「為什麼是所有既有頁面」的說明。
+    private static func allExistingPageNumbers(texDir: URL) -> [Int] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: texDir, includingPropertiesForKeys: nil)) ?? []
+        guard let regex = try? NSRegularExpression(pattern: #"^page-(\d+)\.tex$"#) else { return [] }
+        var numbers: [Int] = []
+        for file in files {
+            let name = file.lastPathComponent
+            let range = NSRange(location: 0, length: (name as NSString).length)
+            guard let match = regex.firstMatch(in: name, range: range),
+                  let numberRange = Range(match.range(at: 1), in: name),
+                  let number = Int(name[numberRange]) else { continue }
+            numbers.append(number)
+        }
+        return numbers.sorted()
     }
 
     /// 掃描 `responses/*.json`（依檔名排序），解碼出所有頁的 `PageResult`。讀不到或無法解碼的檔案
