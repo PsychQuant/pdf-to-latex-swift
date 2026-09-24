@@ -308,10 +308,23 @@ public struct LaTeXNormalizer: Sendable {
 
     /// 跳脫貨幣符號 $（非數學模式的 $）。
     /// 回傳修正後的文字和跳脫的數量。
+    ///
+    /// ## 冪等（PsychQuant/pdf-to-latex-swift#4）
+    ///
+    /// 判斷「這個 `$` 是否已跳脫」看它前面連續反斜線的**奇偶**：奇數個（1、3、5…）代表最後一個反斜線
+    /// 已經跳脫了這個 `$`（例如 `\$15`），維持原樣、不計入跳脫數。偶數個（含 0，例如 `$15` 或
+    /// `\\$15`——後者的兩個反斜線是 LaTeX 換行指令 `\\`，跟 `$` 本身跳脫與否無關）代表這個 `$` 未跳脫，
+    /// 補一個反斜線、計入跳脫數。前面已有的反斜線原樣保留，只在 `$` 前多插入一個。
     public static func escapeCurrencyDollars(_ source: String) -> (result: String, count: Int) {
         let lines = source.components(separatedBy: "\n")
         var result: [String] = []
         var totalCount = 0
+
+        // 找連續反斜線（可為 0）後面接 $ 再接數字的模式（如 $100、\$100、\\$100）。
+        let pattern = #"(\\*)\$(\d)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return (source, 0)
+        }
 
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -320,22 +333,36 @@ public struct LaTeXNormalizer: Sendable {
                 result.append(line)
                 continue
             }
-            // 找 $ 後面接數字的模式（如 $100）
-            let pattern = #"\$(\d)"#
-            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            let ns = line as NSString
+            let range = NSRange(location: 0, length: ns.length)
+            let matches = regex.matches(in: line, range: range)
+            guard !matches.isEmpty else {
                 result.append(line)
                 continue
             }
-            let ns = line as NSString
-            let range = NSRange(location: 0, length: ns.length)
-            let matches = regex.numberOfMatches(in: line, range: range)
-            if matches > 0 {
-                let replaced = regex.stringByReplacingMatches(in: line, range: range, withTemplate: "\\\\\\$$1")
-                result.append(replaced)
-                totalCount += matches
-            } else {
-                result.append(line)
+
+            var pieces: [String] = []
+            var lastEnd = 0
+            var lineCount = 0
+            for match in matches {
+                let backslashRange = match.range(at: 1)
+                let digitRange = match.range(at: 2)
+                pieces.append(ns.substring(with: NSRange(location: lastEnd, length: match.range.location - lastEnd)))
+                let backslashes = ns.substring(with: backslashRange)
+                let digit = ns.substring(with: digitRange)
+                if backslashRange.length.isMultiple(of: 2) {
+                    // 偶數個（含 0）反斜線：$ 未跳脫，補一個反斜線。
+                    pieces.append(backslashes + "\\$" + digit)
+                    lineCount += 1
+                } else {
+                    // 奇數個反斜線：最後一個已經跳脫了這個 $，原樣保留。
+                    pieces.append(backslashes + "$" + digit)
+                }
+                lastEnd = match.range.location + match.range.length
             }
+            pieces.append(ns.substring(from: lastEnd))
+            result.append(pieces.joined())
+            totalCount += lineCount
         }
 
         return (result.joined(separator: "\n"), totalCount)
