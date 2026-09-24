@@ -1,0 +1,409 @@
+import XCTest
+@testable import PDFToLaTeXCore
+
+/// 圖片寬度還原（PsychQuant/macdoc#10）：`FigureRegion.bbox` → `width=<w>\textwidth`。
+final class LaTeXFigureWidthTests: XCTestCase {
+
+    // MARK: - Fixture
+
+    private var projectDir: URL!
+
+    override func setUpWithError() throws {
+        projectDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: projectDir)
+    }
+
+    private func writeManifest(pages: [(number: Int, width: Double)]) throws {
+        let manifest = ProjectManifest(
+            schemaVersion: 1, createdAt: "2026-09-24T00:00:00+08:00",
+            updatedAt: "2026-09-24T00:00:00+08:00", projectName: "fixture",
+            sourcePDF: "input/book.pdf", projectRoot: projectDir.path,
+            pages: pages.map {
+                PageRecord(number: $0.number, width: $0.width, height: 792, rotation: 0,
+                           renderedImagePath: nil, renderedDPI: nil)
+            },
+            blocks: []
+        )
+        try ManifestStore().save(manifest, to: projectDir.appendingPathComponent("manifest.json"))
+    }
+
+    private func writeResponse(_ name: String, figures: [(page: Int, id: String, bbox: [Double])]) throws {
+        let pages = Dictionary(grouping: figures, by: { $0.page })
+            .sorted { $0.key < $1.key }
+            .map { page, figs in
+                PageResult(page: page, latex: "",
+                           figures: figs.map { FigureRegion(id: $0.id, bbox: $0.bbox, caption: nil) },
+                           confidence: nil, notes: nil)
+            }
+        let dir = projectDir.appendingPathComponent("responses", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(PageTranscriptionResponse(pages: pages))
+        try data.write(to: dir.appendingPathComponent(name))
+    }
+
+    private func writeRawResponse(_ name: String, _ text: String) throws {
+        let dir = projectDir.appendingPathComponent("responses", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try text.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+
+    private func writeImage(_ relativePath: String) throws {
+        let url = projectDir.appendingPathComponent(relativePath)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: url)
+    }
+
+    /// 規格範例：第 12 頁、頁寬 612pt、bbox [0.12, 0.08, 0.68, 0.31]。
+    private func writeSpecExample() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.12, 0.08, 0.68, 0.31])])
+        try writeImage("figures/p012-fig01.png")
+    }
+
+    private func apply(_ source: String) -> FigureWidthReport {
+        LaTeXNormalizer.applyFigureWidths(source, projectDir: projectDir)
+    }
+
+    // MARK: - Spec example
+
+    func testSpecExample_noOptions_getsBBoxWidthFraction() throws {
+        try writeSpecExample()
+        let source = """
+        %% === Page 12 ===
+        \\begin{figure}[h]
+        \\includegraphics{figures/p012-fig01.png}
+        \\end{figure}
+        """
+        let report = apply(source)
+
+        XCTAssertEqual(report.result, source.replacingOccurrences(
+            of: "\\includegraphics{figures/p012-fig01.png}",
+            with: "\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}"
+        ))
+        XCTAssertEqual(report.resolutions.count, 1)
+        let resolution = try XCTUnwrap(report.resolutions.first)
+        XCTAssertEqual(resolution.path, "figures/p012-fig01.png")
+        XCTAssertEqual(resolution.page, 12)
+        XCTAssertEqual(resolution.line, 3)
+        guard case let .widthApplied(fraction, widthPoints) = resolution.outcome else {
+            return XCTFail("expected widthApplied, got \(resolution.outcome)")
+        }
+        XCTAssertEqual(fraction, 0.68, accuracy: 1e-12)
+        XCTAssertEqual(widthPoints, 0.68 * 612, accuracy: 1e-9)  // 416.16pt ≈ 5.78in
+    }
+
+    func testExtensionlessPathMatchesCroppedPNG() throws {
+        try writeSpecExample()
+        let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01}")
+    }
+
+    func testStarredFormAndSpacingAreHandled() throws {
+        try writeSpecExample()
+        let report = apply("%% === Page 12 ===\n\\includegraphics* {figures/p012-fig01.png}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics*[width=0.68\\textwidth] {figures/p012-fig01.png}")
+    }
+
+    // MARK: - Merge rule for existing options
+
+    func testExplicitSizeOptionsArePreservedVerbatim() throws {
+        try writeSpecExample()
+        let explicit = [
+            "[width=0.5\\linewidth]",
+            "[height=3cm]",
+            "[totalheight=2in]",
+            "[scale=0.4]",
+            "[angle=90, width=4cm]",
+            "[ width = 3cm ]",
+        ]
+        for options in explicit {
+            let source = "%% === Page 12 ===\n\\includegraphics\(options){figures/p012-fig01.png}"
+            let report = apply(source)
+            XCTAssertEqual(report.result, source, "options \(options) must be kept as written")
+            XCTAssertEqual(report.resolutions.first?.outcome, .explicitSizePreserved, "options \(options)")
+        }
+    }
+
+    /// 舊行為把 scale>2 硬改成 0.8；新契約下 scale 是使用者明確寫的尺寸，原樣保留。
+    func testLargeScaleIsNoLongerRewrittenToArbitraryValue() throws {
+        try writeSpecExample()
+        let source = "%% === Page 12 ===\n\\includegraphics[scale=5]{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertFalse(report.result.contains("0.8"))
+    }
+
+    func testNonSizeOptionsAreKeptAndWidthIsAppendedLast() throws {
+        try writeSpecExample()
+        let source = "%% === Page 12 ===\n\\includegraphics[angle=90, trim={1 2 3 4}, clip]{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(
+            report.result,
+            "%% === Page 12 ===\n\\includegraphics[angle=90, trim={1 2 3 4}, clip,width=0.68\\textwidth]{figures/p012-fig01.png}"
+        )
+    }
+
+    func testEmptyOptionBracketGetsWidth() throws {
+        try writeSpecExample()
+        let report = apply("%% === Page 12 ===\n\\includegraphics[]{figures/p012-fig01.png}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}")
+    }
+
+    // MARK: - Leave unchanged + report
+
+    func testMissingMetadataLeavesTextUnchanged() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig02", [0.1, 0.1, 0.5, 0.2])])
+        try writeImage("figures/p012-fig01.png")
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.first?.outcome, .noMatchingFigure)
+    }
+
+    func testMissingManifestLeavesTextUnchanged() throws {
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.12, 0.08, 0.68, 0.31])])
+        try writeImage("figures/p012-fig01.png")
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        guard case .metadataUnavailable = report.resolutions.first?.outcome else {
+            return XCTFail("expected metadataUnavailable, got \(String(describing: report.resolutions.first?.outcome))")
+        }
+    }
+
+    func testMissingResponsesDirectoryLeavesTextUnchanged() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeImage("figures/p012-fig01.png")
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        guard case .metadataUnavailable = report.resolutions.first?.outcome else {
+            return XCTFail("expected metadataUnavailable, got \(String(describing: report.resolutions.first?.outcome))")
+        }
+    }
+
+    func testMissingImageFileLeavesTextUnchanged() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.12, 0.08, 0.68, 0.31])])
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.first?.outcome, .missingImageFile)
+    }
+
+    func testMissingPageRecordLeavesTextUnchanged() throws {
+        try writeManifest(pages: [(11, 612)])
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.12, 0.08, 0.68, 0.31])])
+        try writeImage("figures/p012-fig01.png")
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.first?.outcome, .missingPageRecord)
+    }
+
+    func testInvalidBBoxLeavesTextUnchanged() throws {
+        let invalid: [[Double]] = [
+            [0.1, 0.1, 0.5],            // 不是 4 個值
+            [0.5, 0.1, 0.7, 0.2],       // 超出頁面右緣
+            [0.1, 0.1, -0.2, 0.3],      // 負寬
+            [0.1, 0.1, 0, 0.3],         // 零寬
+            [0.1, 0.9, 0.5, 0.2],       // 超出頁面下緣
+            [-0.1, 0.1, 0.5, 0.2],      // 負座標
+        ]
+        try writeManifest(pages: [(12, 612)])
+        try writeImage("figures/p012-fig01.png")
+        for bbox in invalid {
+            try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", bbox)])
+            let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+            let report = apply(source)
+            XCTAssertEqual(report.result, source, "bbox \(bbox)")
+            guard case .invalidBoundingBox = report.resolutions.first?.outcome else {
+                XCTFail("bbox \(bbox): expected invalidBoundingBox, got \(String(describing: report.resolutions.first?.outcome))")
+                continue
+            }
+        }
+    }
+
+    func testNoPageContextLeavesTextUnchanged() throws {
+        try writeSpecExample()
+        let source = "\\includegraphics{figures/p012-fig01.png}\n%% === Page 12 ===\nText."
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.first?.outcome, .noPageContext)
+    }
+
+    func testConflictingMetadataIsAmbiguous() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeResponse("pages-011-012.json", figures: [(12, "p012-fig01", [0.1, 0.1, 0.5, 0.2])])
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.1, 0.1, 0.6, 0.2])])
+        try writeImage("figures/p012-fig01.png")
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.first?.outcome, .ambiguousFigure)
+    }
+
+    func testIdenticalDuplicateMetadataIsNotAmbiguous() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeResponse("pages-011-012.json", figures: [(12, "p012-fig01", [0.12, 0.08, 0.68, 0.31])])
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.12, 0.08, 0.68, 0.31])])
+        try writeImage("figures/p012-fig01.png")
+        let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}")
+        XCTAssertTrue(report.result.contains("[width=0.68\\textwidth]"))
+    }
+
+    func testUnreadableResponseFileIsReported_fencedResponseIsRead() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeRawResponse("pages-010-011.json", "not json at all")
+        try writeRawResponse("pages-012-013.json", """
+        ```json
+        {"pages":[{"page":12,"latex":"","figures":[{"id":"p012-fig01","bbox":[0.12,0.08,0.68,0.31],"caption":null}],"confidence":null,"notes":null}]}
+        ```
+        """)
+        try writeImage("figures/p012-fig01.png")
+        let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}")
+        XCTAssertTrue(report.result.contains("[width=0.68\\textwidth]"))
+        XCTAssertEqual(report.unreadableResponseFiles, ["responses/pages-010-011.json"])
+    }
+
+    // MARK: - Matching discipline
+
+    /// 同名 figure 出現在不同頁：以（頁, 完整相對路徑）配對，不跨頁誤配。
+    func testSameNamedFiguresOnDifferentPagesMatchByPage() throws {
+        try writeManifest(pages: [(12, 612), (15, 612)])
+        try writeResponse("pages-012-013.json", figures: [(12, "fig1", [0.1, 0.1, 0.4, 0.2])])
+        try writeResponse("pages-014-015.json", figures: [(15, "fig1", [0.05, 0.1, 0.9, 0.2])])
+        try writeImage("figures/fig1.png")
+        let source = """
+        %% === Page 12 ===
+        \\includegraphics{figures/fig1.png}
+        %% === Page 15 ===
+        \\includegraphics{figures/fig1.png}
+        """
+        let report = apply(source)
+        XCTAssertEqual(report.result, """
+        %% === Page 12 ===
+        \\includegraphics[width=0.4\\textwidth]{figures/fig1.png}
+        %% === Page 15 ===
+        \\includegraphics[width=0.9\\textwidth]{figures/fig1.png}
+        """)
+        XCTAssertEqual(report.resolutions.map(\.page), [12, 15])
+    }
+
+    func testFigureListedOnlyOnAnotherPageDoesNotMatch() throws {
+        try writeManifest(pages: [(12, 612), (15, 612)])
+        try writeResponse("pages-014-015.json", figures: [(15, "p012-fig01", [0.1, 0.1, 0.5, 0.2])])
+        try writeImage("figures/p012-fig01.png")
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.first?.outcome, .noMatchingFigure)
+    }
+
+    func testSubstringOfFigureIdDoesNotMatch() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig1", [0.1, 0.1, 0.5, 0.2])])
+        try writeImage("figures/p012-fig10.png")
+        try writeImage("figures/xp012-fig1.png")
+        let source = """
+        %% === Page 12 ===
+        \\includegraphics{figures/p012-fig10.png}
+        \\includegraphics{figures/xp012-fig1.png}
+        """
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.map(\.outcome), [.noMatchingFigure, .noMatchingFigure])
+    }
+
+    func testNonFigurePathsAndCommentedCallsAreIgnored() throws {
+        try writeSpecExample()
+        let source = """
+        %% === Page 12 ===
+        \\includegraphics{logo.pdf}
+        % \\includegraphics{figures/p012-fig01.png}
+        Price 100\\% \\includegraphics{figures/p012-fig01.png}
+        """
+        let report = apply(source)
+        XCTAssertEqual(report.result, source.replacingOccurrences(
+            of: "100\\% \\includegraphics{", with: "100\\% \\includegraphics[width=0.68\\textwidth]{"
+        ))
+        XCTAssertEqual(report.resolutions.count, 1)
+        XCTAssertEqual(report.resolutions.first?.line, 4)
+    }
+
+    // MARK: - Idempotency
+
+    func testSecondRunChangesNothing() throws {
+        try writeSpecExample()
+        try writeManifest(pages: [(12, 612), (15, 612)])
+        // p015-fig01 有 metadata 但沒有裁切檔：兩次都應原樣保留並回報。
+        try writeResponse("pages-014-015.json", figures: [(15, "p015-fig01", [0.2, 0.1, 0.5, 0.3])])
+        let source = """
+        %% === Page 12 ===
+        \\includegraphics{figures/p012-fig01.png}
+        %% === Page 15 ===
+        \\includegraphics{figures/p015-fig01.png}
+        """
+        let first = apply(source)
+        XCTAssertNotEqual(first.result, source)
+        let second = apply(first.result)
+        XCTAssertEqual(second.result, first.result)
+        XCTAssertEqual(second.resolutions.map(\.outcome), [.explicitSizePreserved, .missingImageFile])
+        XCTAssertEqual(first.resolutions.last?.outcome, .missingImageFile)
+    }
+
+    func testFixImageScaleCompatibilityWrapperUsesNewAlgorithm() throws {
+        try writeSpecExample()
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+        XCTAssertEqual(LaTeXNormalizer.fixImageScale(source, projectDir: projectDir), apply(source).result)
+    }
+
+    // MARK: - normalizeProject integration
+
+    func testNormalizeProject_appliesFigureWidthsAndReportsThem() throws {
+        try writeSpecExample()
+        let mainURL = projectDir.appendingPathComponent("accumulated.tex")
+        try """
+        \\documentclass{book}
+        \\usepackage{graphicx}
+        \\begin{document}
+
+        %% === Page 12 ===
+        \\begin{figure}[h]
+        \\centering
+        \\includegraphics{figures/p012-fig01.png}
+        \\caption{Scatter plot of wages.}
+        \\end{figure}
+        \\includegraphics{figures/p012-fig09.png}
+
+        \\end{document}
+        """.write(to: mainURL, atomically: true, encoding: .utf8)
+
+        let normalizer = LaTeXNormalizer()
+        let report1 = try normalizer.normalizeProject(mainTexURL: mainURL)
+        let first = try String(contentsOf: mainURL, encoding: .utf8)
+        XCTAssertTrue(report1.mainFileChanged)
+        XCTAssertTrue(first.contains("\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}"))
+        XCTAssertTrue(first.contains("\\includegraphics{figures/p012-fig09.png}"))
+        XCTAssertEqual(report1.figureWidthResolutions.map(\.path),
+                       ["figures/p012-fig01.png", "figures/p012-fig09.png"])
+        guard case .widthApplied = report1.figureWidthResolutions.first?.outcome else {
+            return XCTFail("expected widthApplied")
+        }
+        XCTAssertEqual(report1.figureWidthResolutions.last?.outcome, .noMatchingFigure)
+
+        let report2 = try normalizer.normalizeProject(mainTexURL: mainURL)
+        XCTAssertFalse(report2.mainFileChanged)
+        XCTAssertEqual(try String(contentsOf: mainURL, encoding: .utf8), first)
+        XCTAssertEqual(report2.figureWidthResolutions.map(\.outcome),
+                       [.explicitSizePreserved, .noMatchingFigure])
+    }
+}
