@@ -20,6 +20,9 @@ public struct NormalizeProjectReport: Sendable, Equatable {
     public let figureWidthResolutions: [FigureWidthResolution]
     /// 讀不到或無法解碼的 `responses/*.json`（相對於專案目錄）。
     public let unreadableResponseFiles: [String]
+    /// 頁碼還原的紀錄（插入、舊版 counter 移動、衝突、找不到章名）。
+    /// `line` 以步驟 13 的中間原始碼為準。
+    public let pageCounterNotes: [PageCounterNote]
 
     public init(
         mainFileChanged: Bool, preambleFileChanged: Bool,
@@ -28,7 +31,8 @@ public struct NormalizeProjectReport: Sendable, Equatable {
         paperSizeFixed: Bool = false, fontPackageFixed: Bool = false,
         fontSizeFixed: Bool = false, marginsFixed: Bool = false,
         figureWidthResolutions: [FigureWidthResolution] = [],
-        unreadableResponseFiles: [String] = []
+        unreadableResponseFiles: [String] = [],
+        pageCounterNotes: [PageCounterNote] = []
     ) {
         self.mainFileChanged = mainFileChanged
         self.preambleFileChanged = preambleFileChanged
@@ -42,6 +46,7 @@ public struct NormalizeProjectReport: Sendable, Equatable {
         self.marginsFixed = marginsFixed
         self.figureWidthResolutions = figureWidthResolutions
         self.unreadableResponseFiles = unreadableResponseFiles
+        self.pageCounterNotes = pageCounterNotes
     }
 }
 
@@ -438,7 +443,8 @@ public struct LaTeXNormalizer: Sendable {
         // 13. 還原原始頁碼（第一個 page marker、章節邊界、切回 arabic）。
         //     依賴 %% === Page N === 標記，必須在步驟 15 移除標記之前執行，
         //     也必須在 5.5／5.6 章節修正之後執行（才看得到修正後的 \chapter）。
-        mainSource = Self.insertPageCounters(mainSource)
+        let pageCounters = Self.applyPageCounters(mainSource)
+        mainSource = pageCounters.result
 
         // 14. 依 FigureRegion.bbox 還原圖片寬度（需要 manifest + responses + page marker；
         //     必須在步驟 15 移除標記之前）。未改寫者連同原因記入報告，不套任何 fallback 比例。
@@ -476,7 +482,8 @@ public struct LaTeXNormalizer: Sendable {
             fontSizeFixed: fontSizeFixed,
             marginsFixed: marginsFixed,
             figureWidthResolutions: figureWidths.resolutions,
-            unreadableResponseFiles: figureWidths.unreadableResponseFiles
+            unreadableResponseFiles: figureWidths.unreadableResponseFiles,
+            pageCounterNotes: pageCounters.notes
         )
     }
 
@@ -1341,8 +1348,19 @@ public struct LaTeXNormalizer: Sendable {
     // MARK: - Page Markers
 
     /// 移除 %% === Page N === 標記行。
+    /// 只移除真正的註解（`LaTeXSourceScan.isComment`）：verbatim 類環境與 `\verb` 內長得像
+    /// marker 的文字、巨集定義內的註解都保留原樣。
     func removePageMarkers(_ source: String) -> String {
         let pattern = #"%%\s*===\s*Page\s+\d+\s*===\s*\n?"#
-        return source.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return source }
+        let ns = source as NSString
+        let matches = regex.matches(in: source, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return source }
+        let scan = LaTeXSourceScan(source)
+        let result = NSMutableString(string: source)
+        for match in matches.reversed() where scan.isComment(match.range.location) {
+            result.deleteCharacters(in: match.range)
+        }
+        return result as String
     }
 }
