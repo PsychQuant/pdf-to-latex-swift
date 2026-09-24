@@ -374,4 +374,53 @@ final class FigureCropMigrationTests: XCTestCase {
         let outcomes = try PageTranscriber().migrateFigureCrops(project: project, pageNumbers: [1])
         XCTAssertEqual(outcomes, [FigureMigrationOutcome(page: 1, kind: .noPageTexFile)])
     }
+
+    /// Codex R3 指出的確切情境：`tex/` 是指向「父目錄權限受限」的符號連結時，
+    /// `FileManager.fileExists(atPath:)` 對它回報 `false`——跟「真的不存在」是同一個布林值，
+    /// 分不出來。R2 的版本靠這個 Bool 判斷「不存在就回傳空清單」，會在這裡誤判。R3 修法拿掉這個
+    /// 前置檢查，改成直接嘗試列舉、只把操作本身丟出的 `.fileReadNoSuchFile` 當空清單，這裡驗證
+    /// 這個情境下拋出的是別的錯誤（不是 `.fileReadNoSuchFile`），因此會 throw、不會誤判成空清單
+    /// 去覆寫 accumulated.tex。
+    func testSymlinkedTexDirectoryWithInaccessibleParentThrowsInsteadOfAppearingEmpty() throws {
+        let image = try writePageImage(page: 5, color: Self.red)
+        try writePageTex(page: 5, content: "\\includegraphics{figures/fig1.png}")
+        try writeResponses([PageResult(
+            page: 5, latex: "", figures: [FigureRegion(id: "fig1", bbox: [0.1, 0.1, 0.4, 0.3], caption: nil)],
+            confidence: nil, notes: nil
+        )])
+        let project = makeProject(pages: [
+            PageRecord(number: 5, width: 612, height: 792, rotation: 0, renderedImagePath: image, renderedDPI: nil),
+        ])
+        let transcriber = PageTranscriber()
+        _ = try transcriber.migrateFigureCrops(project: project, pageNumbers: [5])
+        let goodAccumulated = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertFalse(goodAccumulated.isEmpty)
+
+        // 把真正的 tex/ 搬到一個「父目錄權限受限」的地方，projectDir/tex 換成指向它的符號連結。
+        let hiddenParent = projectDir.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: hiddenParent, withIntermediateDirectories: true)
+        let realTexURL = hiddenParent.appendingPathComponent("realTex")
+        let originalTexURL = projectDir.appendingPathComponent("tex")
+        try FileManager.default.moveItem(at: originalTexURL, to: realTexURL)
+        try FileManager.default.createSymbolicLink(at: originalTexURL, withDestinationURL: realTexURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: hiddenParent.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: hiddenParent.path)
+            try? FileManager.default.removeItem(at: hiddenParent)
+        }
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: originalTexURL.path),
+            "先確認這個情境下 fileExists 真的回報 false（跟「真的不存在」分不出來），這正是要修的問題"
+        )
+
+        XCTAssertThrowsError(try transcriber.migrateFigureCrops(project: project, pageNumbers: [5]))
+
+        let afterFailure = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertEqual(afterFailure, goodAccumulated, "存取被拒時不該把 accumulated.tex 換成空內容")
+    }
 }

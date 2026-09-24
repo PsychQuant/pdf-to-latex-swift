@@ -155,15 +155,29 @@ extension PageTranscriber {
     /// 不是這次遷移要求的子集。重建 `accumulated.tex` 一定要用這份清單，見
     /// `migrateFigureCrops` 文件裡「為什麼是所有既有頁面」的說明。
     ///
-    /// ## 目錄不存在 vs 列舉失敗（Codex R2 審查）
+    /// ## 目錄不存在 vs 列舉失敗（Codex R2、R3 審查）
     ///
     /// `texDir` 真的不存在時回傳空陣列——這是合法狀態（專案從未渲染過任何頁面）。但目錄**存在**、
     /// 列舉卻失敗（權限、I/O 錯誤）時**往外拋錯，不吞成空清單**：吞掉的話，
     /// `migrateFigureCrops` 會拿著這份假的「一頁都沒有」清單去重建 `accumulated.tex`，用一份
     /// 沒有任何頁面正文的內容覆寫掉原本完好的總文件——這比「不重建」還糟。
+    ///
+    /// R2 的版本先用 `FileManager.fileExists(atPath:)` 判斷「存不存在」，存在才列舉。R3 指出這個
+    /// 前置檢查本身就不可靠：`fileExists` 回傳 `false` 不只代表路徑真的不存在，也可能代表**存取
+    /// 失敗**（例如符號連結指到權限受限的目錄）——兩者都回傳 `false`，光看這一個 Bool 分不出來，
+    /// 於是又繞回同一種「假裝是空的」風險，只是換了個位置。
+    ///
+    /// 改法：不先猜，直接嘗試列舉，只把**這個操作自己丟出來、確認是「找不到檔案」**的錯誤
+    /// （`CocoaError.fileReadNoSuchFile`，`contentsOfDirectory` 對不存在路徑實測丟的就是這個）
+    /// 當作「合法的空狀態」而回傳 `[]`；其他任何錯誤（權限不足等）原樣往外拋，不臆測。判斷依據
+    /// 是操作實際回報的錯誤，不是另一個可能同樣不可靠的前置檢查。
     private static func allExistingPageNumbers(texDir: URL) throws -> [Int] {
-        guard FileManager.default.fileExists(atPath: texDir.path) else { return [] }
-        let files = try FileManager.default.contentsOfDirectory(at: texDir, includingPropertiesForKeys: nil)
+        let files: [URL]
+        do {
+            files = try FileManager.default.contentsOfDirectory(at: texDir, includingPropertiesForKeys: nil)
+        } catch CocoaError.fileReadNoSuchFile {
+            return []
+        }
         let regex = try NSRegularExpression(pattern: #"^page-(\d+)\.tex$"#)
         var numbers: [Int] = []
         for file in files {
