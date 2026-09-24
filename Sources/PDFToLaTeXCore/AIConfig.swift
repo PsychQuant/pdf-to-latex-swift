@@ -199,11 +199,22 @@ public struct AIConfig: Codable, Sendable, Equatable {
 
     // MARK: - OCR Backend Setting
 
-    /// 使用者明確設定 OCR 預設後端的入口（PsychQuant/pdf-to-latex-swift#11）。
+    /// 使用者明確設定 OCR 預設後端的**唯一**入口（PsychQuant/pdf-to-latex-swift#11）。
     /// 同時更新 `ocrDefaultBackendOverride`（讓讀取端能區分「使用者設定過」與「只是預設值」）
     /// 與舊欄位 `ocrDefaultBackend`（維持與依賴舊欄位的既有讀取端相容，例如 `config ocr list`）。
     /// 呼叫端（如 macdoc 的 `config ocr set-backend`）應該先 `AIConfig.load()`、呼叫本方法、
     /// 再 `save()`——本方法只改記憶體中的值，不做任何驗證或落地。
+    ///
+    /// ## 邊界（Codex R1 審查提出，記錄下來但刻意不擴充程式碼修）
+    ///
+    /// `ocrDefaultBackend`（舊欄位）與 `ocrDefaultBackendOverride`（新欄位）都是 `public var`，
+    /// 沒有任何機制阻止呼叫端繞過本方法直接賦值——例如 `config.ocrDefaultBackend = "mlx"` 或用
+    /// 帶 `ocrDefaultBackendOverride:` 參數的 `init(...)` 直接建構，都可能讓兩個欄位不同步。這不是
+    /// 這次修的漏洞：`AIConfig` 全部欄位本來就是任意賦值的 plain 設定資料，沒有任何跨欄位不變量
+    /// 由型別本身保證（`ocrDefaultHost` 與 `ocrHosts` 之間也一樣）。`ocrDefaultBackendOverride`
+    /// 這個欄位精確的保證只到「有沒有經過 `setOCRDefaultBackend` 呼叫」，不是「使用者的『真實』意圖
+    /// 一定被記錄」——**macdoc 的 `config ocr set-backend` 必須改叫這個方法，不能再直接賦值舊欄位**
+    /// （見協調者整合須知），否則新欄位仍然是 nil，整個修法沒有意義。
     public mutating func setOCRDefaultBackend(_ backend: String) {
         ocrDefaultBackendOverride = backend
         ocrDefaultBackend = backend
