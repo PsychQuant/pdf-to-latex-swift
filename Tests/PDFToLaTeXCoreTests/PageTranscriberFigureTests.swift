@@ -229,7 +229,7 @@ final class PageTranscriberFigureTests: XCTestCase {
         XCTAssertEqual(result.figureReport.resolutions, [])
     }
 
-    /// bbox 超出頁面：仍裁切與頁面相交的部分（不讓文件因缺圖而無法編譯），但寬度不補
+    /// bbox 超出頁面（不合法）：仍裁切與頁面相交的部分（不讓文件因缺圖而無法編譯），但寬度不補
     /// （`invalidBoundingBox`），並記一筆 note 說明圖可能被截斷。
     func testOutOfRangeBBoxIsCroppedToThePageButGetsNoWidthAndIsReported() throws {
         let image = try writePageImage(page: 18, color: Self.red)

@@ -111,6 +111,10 @@ extension LaTeXNormalizer {
     /// 區分大小寫）。`keepaspectratio`、`angle`、`trim`、`clip`、`natwidth` 等都不算。
     static let explicitSizeOptionKeys: Set<String> = ["width", "height", "totalheight", "scale"]
 
+    /// TeX 直接使用、不再補副檔名的圖檔副檔名（封閉列舉，比對時轉小寫）：pdftex.def（TeX Live
+    /// 2025）的 `\Gin@extensions`（pdf、png、jpg、mps、jpeg、jbig2、jb2），加上 epstopdf 加入的 eps。
+    static let graphicsFileExtensions: Set<String> = ["pdf", "png", "jpg", "mps", "jpeg", "jbig2", "jb2", "eps"]
+
     /// 有效頁寬的上限（bp）：PDF 頁面尺寸上限 14400 單位（200in）。bbox 寬 ≤ 1，所以寫出的寬度
     /// 不會超過約 14400bp，低於 TeX 的 `\maxdimen`（約 16322bp）。
     static let maxPageWidthPoints: Double = 14400
@@ -147,8 +151,9 @@ extension LaTeXNormalizer {
     /// 1. 本頁的裁切檔 `FigureAssetPath.cropped(page: N, id:)`，例如 `figures/p018-fig1.png`
     ///    （PsychQuant/macdoc#208 起的檔名）；
     /// 2. `figures/<id>.png`（之前的版本的檔名，讓既有專案仍配得上）。
-    /// 原始碼路徑必須與其中之一完全相同，或是省略 `.png` 的同一路徑（id 含 `.` 時也算）。不做子字串比對，也不跨頁
-    /// 借用同名 figure 的 bbox。同一個 key 有多筆 bbox 時只有全部相同才算唯一。
+    /// 原始碼路徑必須與其中之一完全相同，或是省略 `.png` 的同一路徑（id 含 `.` 時也算；明確寫了
+    /// `graphicsFileExtensions` 內副檔名的引用不算省略）。不做子字串比對，也不跨頁借用同名 figure
+    /// 的 bbox。同一個 key 有多筆 bbox 時只有全部相同才算唯一。
     ///
     /// ## 既有選項的合併規則
     ///
@@ -365,11 +370,12 @@ extension LaTeXNormalizer {
     static func matchFigure(
         path: String, page: Int, metadata: FigureMetadata, croppedFiles: Set<String>?
     ) -> FigureMatch? {
-        // 省略 `.png` 的引用：id 可以含 `.`（`fig_2.b`），所以不以「有沒有副檔名」判斷，凡不是以
-        // `.png` 結尾都另試補上 `.png`（pdflatex 實測 `figures/p018-fig_2.b` 會找到 `….png`）。
-        // 配對仍是 metadata 的完整路徑比對，不會因此配到別的圖。
+        // 省略 `.png` 的引用：id 可以含 `.`（`fig_2.b`），所以不以「有沒有副檔名」判斷——pdflatex
+        // 實測 `figures/p018-fig_2.b` 會自動補 `.png` 找到檔。但明確寫了 TeX 認得的圖檔副檔名時
+        // （`graphicsFileExtensions`），TeX 直接用那個檔，不補 `.png`。
         var candidates = [path]
-        if !path.hasSuffix(".png") {
+        let pathExtension = (path as NSString).pathExtension.lowercased()
+        if !graphicsFileExtensions.contains(pathExtension) {
             candidates.append(path + ".png")
         }
         for candidate in candidates {
