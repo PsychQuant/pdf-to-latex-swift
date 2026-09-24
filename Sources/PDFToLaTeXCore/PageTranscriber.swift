@@ -7,7 +7,8 @@ import Foundation
 /// - `accumulated.tex`：從 `tex/page-NNNN.tex` 自動組合的完整文件（derived, 每次重建）
 /// - `tex/page-NNNN.tex`：每頁獨立的 LaTeX 片段（source of truth）
 /// - `responses/pages-NNN-NNN.json`：每次 AI 呼叫的原始回應
-/// - `figures/pNNN-figNN.png`：裁切的 figure 圖片
+/// - `figures/p<頁碼>-<id>.png`：裁切的 figure 圖片（路徑一定帶頁碼，見 `FigureAssetPath`；
+///   PsychQuant/macdoc#208）
 public struct PageTranscriber: Sendable {
     public init() {}
 
@@ -166,13 +167,23 @@ public struct PageTranscriber: Sendable {
 
             // Post-process 每一頁
             for pageResult in response.pages {
-                // 1. 裁切 figures
-                for figure in pageResult.figures {
-                    guard figure.bbox.count == 4 else { continue }
-                    if let imgPath = imagePaths.first(where: {
-                        $0.contains(String(format: "page-%04d", pageResult.page))
-                    }) ?? imagePaths.first {
-                        cropFigure(figure: figure, pageImagePath: imgPath, figuresDir: figuresDir)
+                // 1. 裁切 figures（帶頁碼前綴）、LaTeX 路徑改寫成裁切檔並補寬度（#208、#209）
+                let pageImagePath = imagePaths.first(where: {
+                    $0.contains(String(format: "page-%04d", pageResult.page))
+                }) ?? imagePaths.first
+                let pageWidth = project.manifest.pages.first(where: { $0.number == pageResult.page })?.width
+                let processed = Self.postProcessPage(
+                    pageResult, pageImagePath: pageImagePath, pageWidth: pageWidth, projectRoot: project.root
+                )
+                for note in processed.notes {
+                    print("⚠ \(note)")
+                }
+                for resolution in processed.figureReport.resolutions {
+                    switch resolution.outcome {
+                    case .widthApplied, .explicitSizePreserved:
+                        continue
+                    default:
+                        print("⚠ 第 \(pageResult.page) 頁 \(resolution.path)（第 \(resolution.line) 行）未補寬度：\(resolution.outcome)")
                     }
                 }
 
@@ -180,7 +191,7 @@ public struct PageTranscriber: Sendable {
                 let pageTexURL = texDir.appendingPathComponent(
                     String(format: "page-%04d.tex", pageResult.page)
                 )
-                try pageResult.latex.write(to: pageTexURL, atomically: true, encoding: .utf8)
+                try processed.latex.write(to: pageTexURL, atomically: true, encoding: .utf8)
 
                 allResults.append(pageResult)
                 print("ok page \(pageResult.page) (\(pageResult.figures.count) figures)")
@@ -376,27 +387,89 @@ public struct PageTranscriber: Sendable {
         }
     }
 
-    // MARK: - Figure Cropping
+    // MARK: - Figure Post-processing (PsychQuant/macdoc#208, #209)
 
-    private func cropFigure(figure: FigureRegion, pageImagePath: String, figuresDir: URL) {
-        do {
-            let pageImage = try CGImageHelper.load(from: URL(fileURLWithPath: pageImagePath))
-            let imgW = Double(pageImage.width)
-            let imgH = Double(pageImage.height)
+    /// 一頁的後處理結果。
+    struct PagePostProcessResult {
+        /// 要寫進 `tex/page-NNNN.tex` 的 LaTeX。
+        let latex: String
+        /// 每個 `\includegraphics{figures/...}` 的處理結果（與 normalize 的回報同一型別）。
+        let figureReport: FigureWidthReport
+        /// 裁切時的問題（id 不安全、同頁撞名、裁切失敗），給人看的訊息。
+        let notes: [String]
+    }
 
-            let cropRect = CGRect(
-                x: figure.bbox[0] * imgW,
-                y: figure.bbox[1] * imgH,
-                width: figure.bbox[2] * imgW,
-                height: figure.bbox[3] * imgH
-            )
+    /// 一頁 AI 回應的後處理（不呼叫 AI，可單獨測試）：
+    /// 1. 每個 figure 裁切到 `FigureAssetPath.cropped(page:id:)`（帶頁碼，兩頁同 id 不會互相覆蓋）；
+    /// 2. 以 `LaTeXNormalizer.applyFigureWidths(toTranscribedPage:…)` 把 LaTeX 的路徑改寫成裁切檔、
+    ///    補上寬度——與 normalize 同一份規則，normalize 之後只會看到已帶尺寸的呼叫。
+    ///
+    /// 不裁切（並記入 `notes`）的情況（封閉列舉）：id 不安全（`FigureAssetPath.isSafeID`）；
+    /// bbox 不是 4 個數值；同一頁已有另一個 figure 對應到同一個裁切檔（只裁第一個；bbox 不同時
+    /// 記一筆，寬度會回報 `ambiguousFigure`）；沒有頁面圖；讀圖、裁切或寫檔失敗。
+    static func postProcessPage(
+        _ pageResult: PageResult, pageImagePath: String?, pageWidth: Double?, projectRoot: URL
+    ) -> PagePostProcessResult {
+        let notes = cropFigures(of: pageResult, pageImagePath: pageImagePath, projectRoot: projectRoot)
+        let report = LaTeXNormalizer.applyFigureWidths(
+            toTranscribedPage: pageResult.latex, page: pageResult.page,
+            figures: pageResult.figures, pageWidth: pageWidth, projectDir: projectRoot
+        )
+        return PagePostProcessResult(latex: report.result, figureReport: report, notes: notes)
+    }
 
-            guard let cropped = pageImage.cropping(to: cropRect) else { return }
-            let outputURL = figuresDir.appendingPathComponent("\(figure.id).png")
-            try CGImageHelper.writePNG(cropped, to: outputURL)
-        } catch {
-            print("裁切 figure \(figure.id) 失敗: \(error.localizedDescription)")
+    private static func cropFigures(of pageResult: PageResult, pageImagePath: String?, projectRoot: URL) -> [String] {
+        let page = pageResult.page
+        var notes: [String] = []
+        var cropped: [String: [Double]] = [:]
+        for figure in pageResult.figures {
+            guard let path = FigureAssetPath.cropped(page: page, id: figure.id) else {
+                notes.append("第 \(page) 頁 figure id「\(figure.id)」不是安全的檔名（只允許英數字、-、_、.），未裁切")
+                continue
+            }
+            guard figure.bbox.count == 4 else {
+                notes.append("第 \(page) 頁 \(path) 的 bbox 不是 4 個數值 \(figure.bbox)，未裁切")
+                continue
+            }
+            if let first = cropped[path] {
+                if first != figure.bbox {
+                    notes.append("第 \(page) 頁有多個 figure 對應到 \(path)（bbox \(first) 與 \(figure.bbox)），只裁切第一個")
+                }
+                continue
+            }
+            cropped[path] = figure.bbox
+            guard let pageImagePath else {
+                notes.append("找不到第 \(page) 頁的頁面圖，未裁切 \(path)")
+                continue
+            }
+            do {
+                try cropFigure(
+                    bbox: figure.bbox, pageImagePath: pageImagePath,
+                    to: projectRoot.appendingPathComponent(path)
+                )
+            } catch {
+                notes.append("裁切 \(path) 失敗: \(error.localizedDescription)")
+            }
         }
+        return notes
+    }
+
+    private static func cropFigure(bbox: [Double], pageImagePath: String, to outputURL: URL) throws {
+        let pageImage = try CGImageHelper.load(from: URL(fileURLWithPath: pageImagePath))
+        let imgW = Double(pageImage.width)
+        let imgH = Double(pageImage.height)
+
+        let cropRect = CGRect(
+            x: bbox[0] * imgW,
+            y: bbox[1] * imgH,
+            width: bbox[2] * imgW,
+            height: bbox[3] * imgH
+        )
+
+        guard let cropped = pageImage.cropping(to: cropRect) else {
+            throw PDFToLaTeXError.validation("bbox \(bbox) 與頁面圖沒有交集")
+        }
+        try CGImageHelper.writePNG(cropped, to: outputURL)
     }
 
     // MARK: - Schema
