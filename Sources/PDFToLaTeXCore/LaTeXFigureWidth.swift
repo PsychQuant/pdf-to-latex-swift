@@ -551,7 +551,10 @@ extension LaTeXNormalizer {
 
     /// 讀取一個 response 檔。codex 寫的是純 JSON；claude／gemini 寫的是 CLI stdout，
     /// 可能包在 markdown code fence 裡（與 `CLITranscriber` 的解析規則相同）。
-    private static func decodePageResponse(at url: URL) -> PageTranscriptionResponse? {
+    ///
+    /// 不是 `private`：`FigureCropMigration`（PsychQuant/pdf-to-latex-swift#222）重用同一份解析
+    /// 規則找某一頁的 `PageResult`，避免兩處各寫一份 markdown code fence 的剝除邏輯。
+    static func decodePageResponse(at url: URL) -> PageTranscriptionResponse? {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         var json = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if json.hasPrefix("```") {
