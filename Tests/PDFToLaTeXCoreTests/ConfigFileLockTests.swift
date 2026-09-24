@@ -88,6 +88,44 @@ final class ConfigFileLockTests: XCTestCase {
         }
     }
 
+    /// 只有競爭（EWOULDBLOCK／EAGAIN）會輪詢、EINTR 立即重試；其他 flock
+    /// 失敗必須立刻拋出並帶 errno，不能被當成競爭等到逾時（macdoc#204）。
+    func testNonContentionFlockFailureThrowsImmediatelyWithItsErrno() throws {
+        try withTempConfigPath { path in
+            let started = DispatchTime.now().uptimeNanoseconds
+            XCTAssertThrowsError(
+                try ConfigFileLock.withLock(
+                    forConfigAt: path, pollInterval: 0.05, timeout: 3,
+                    acquire: { _, _ in errno = ENOLCK; return -1 }
+                ) { XCTFail("沒拿到鎖不能執行 body") }
+            ) { error in
+                XCTAssertFalse(error is ConfigFileLock.TimeoutError, "非競爭失敗不能被當成逾時：\(error)")
+                let nsError = error as NSError
+                XCTAssertEqual(nsError.domain, "PDFToLaTeXCore.ConfigFileLock")
+                XCTAssertEqual(nsError.code, Int(ENOLCK))
+            }
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+            XCTAssertLessThan(elapsed, 1, "不能等滿逾時時間")
+        }
+    }
+
+    func testInterruptedFlockIsRetriedAndContentionIsPolled() throws {
+        try withTempConfigPath { path in
+            var attempts = 0
+            let results: [Int32] = [EINTR, EWOULDBLOCK, EAGAIN]
+            let value = try ConfigFileLock.withLock(
+                forConfigAt: path, pollInterval: 0.01, timeout: 3,
+                acquire: { fd, operation in
+                    defer { attempts += 1 }
+                    if attempts < results.count { errno = results[attempts]; return -1 }
+                    return flock(fd, operation)
+                }
+            ) { 42 }
+            XCTAssertEqual(value, 42)
+            XCTAssertEqual(attempts, 4)
+        }
+    }
+
     private func withTempConfigPath(_ body: (String) throws -> Void) throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
