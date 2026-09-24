@@ -12,6 +12,8 @@ final class AIConfigTests: XCTestCase {
         XCTAssertNil(config.ocrDefaultHost)
         XCTAssertEqual(config.ocrDefaultModel, "glm-ocr")
         XCTAssertEqual(config.ocrDefaultBackend, "ollama")
+        // 使用者從未設定過 backend：override 欄位是 nil（PsychQuant/pdf-to-latex-swift#11）。
+        XCTAssertNil(config.ocrDefaultBackendOverride)
     }
 
     func testEncodeDecodeCycle() throws {
@@ -89,6 +91,80 @@ final class AIConfigTests: XCTestCase {
         XCTAssertNil(loaded.ocrDefaultHost)
         XCTAssertEqual(loaded.ocrDefaultModel, "glm-ocr")
         XCTAssertEqual(loaded.ocrDefaultBackend, "ollama")
+        // 舊 config.json 沒有這個 key：override 是 nil，不會被 ocrDefaultBackend 的預設值污染。
+        XCTAssertNil(loaded.ocrDefaultBackendOverride)
+    }
+
+    // MARK: - ocrDefaultBackendOverride（PsychQuant/pdf-to-latex-swift#11）
+
+    /// #11 的根因情境：某個與 OCR 無關的命令呼叫過 save()，把 ocrDefaultBackend 的
+    /// struct 預設值 "ollama" 寫進了 config.json。讀這種「被污染」的舊檔時，
+    /// override 欄位必須是 nil —— 不能從舊的 ocrDefaultBackend key 推斷出「使用者設定過」。
+    func testOverrideNotInferredFromPollutedOldKey() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let configURL = tmpDir.appendingPathComponent("config.json")
+
+        // 模擬「config ai detect」這類與 OCR 無關的命令寫出的檔案：
+        // 沒有 ocrDefaultBackendOverride key，但 ocrDefaultBackend 已被預設值污染。
+        let pollutedJSON = """
+        {
+          "available": ["codex"],
+          "transcription": "codex",
+          "agent": "claude",
+          "ocrDefaultBackend": "ollama"
+        }
+        """
+        try pollutedJSON.write(to: configURL, atomically: true, encoding: .utf8)
+
+        let loaded = try AIConfig.load(from: configURL)
+        XCTAssertEqual(loaded.ocrDefaultBackend, "ollama", "舊欄位照常解碼，不受影響")
+        XCTAssertNil(loaded.ocrDefaultBackendOverride, "不可從被污染的舊 key 推斷使用者設定過")
+    }
+
+    /// setOCRDefaultBackend 要同時更新新舊兩個欄位（同 repo #11 的「決定與理由」）。
+    func testSetOCRDefaultBackendUpdatesBothFields() {
+        var config = AIConfig()
+        XCTAssertNil(config.ocrDefaultBackendOverride)
+
+        config.setOCRDefaultBackend("mlx")
+
+        XCTAssertEqual(config.ocrDefaultBackendOverride, "mlx")
+        XCTAssertEqual(config.ocrDefaultBackend, "mlx")
+    }
+
+    /// 設定過的 override 要能存檔、重新讀回。
+    func testSetOCRDefaultBackendPersistsAcrossSaveAndLoad() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let configURL = tmpDir.appendingPathComponent("config.json")
+
+        var config = AIConfig()
+        config.setOCRDefaultBackend("ollama")
+        try config.save(to: configURL)
+
+        let loaded = try AIConfig.load(from: configURL)
+        XCTAssertEqual(loaded.ocrDefaultBackendOverride, "ollama")
+        XCTAssertEqual(loaded.ocrDefaultBackend, "ollama")
+    }
+
+    /// override 是 nil 時不寫進 JSON（比照既有 ocrDefaultHost 的慣例：
+    /// AIConfigPreservationTests.testClearingKnownOptionalDoesNotRestoreOldValue）。
+    func testOverrideNilIsOmittedFromSavedJSON() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let configURL = tmpDir.appendingPathComponent("config.json")
+
+        try AIConfig().save(to: configURL)
+
+        let raw = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
+        XCTAssertNil(raw?["ocrDefaultBackendOverride"])
     }
 
     func testDetectReturnsNonEmpty() {

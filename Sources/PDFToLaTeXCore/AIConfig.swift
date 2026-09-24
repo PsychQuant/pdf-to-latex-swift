@@ -18,8 +18,19 @@ public struct AIConfig: Codable, Sendable, Equatable {
     public var ocrDefaultHost: String?
     /// 預設 OCR 模型名稱（ollama 後端）。
     public var ocrDefaultModel: String
-    /// 預設 OCR 後端（ollama / mlx）。
+    /// 預設 OCR 後端（ollama / mlx）。`init()` 給它非 nil 的 struct 預設值 `"ollama"`，
+    /// 所以**光看這個欄位分不出「使用者設定過」還是「只是預設值」**——任何呼叫過
+    /// `save()` 的命令（即使與 OCR 完全無關，例如 `config ai detect`）都會把 `"ollama"`
+    /// 寫進 config.json。要問「使用者是否明確設定過」請讀 `ocrDefaultBackendOverride`，
+    /// 不要讀這個欄位（PsychQuant/pdf-to-latex-swift#11）。這個欄位本身繼續保留、繼續更新，
+    /// 只為了相容既有讀取端（如 `config ocr list` 印出的 backend）。
     public var ocrDefaultBackend: String
+    /// 使用者透過 `setOCRDefaultBackend(_:)` 明確設定過的後端；`nil` 表示從未設定過。
+    /// 與 `ocrDefaultBackend` 不同，這個欄位沒有非 nil 的 struct 預設值，也**不會**從舊的
+    /// `ocrDefaultBackend` key 推斷（那個 key 可能只是無關命令寫入的預設值，不代表使用者的
+    /// 選擇）。讀取端要判斷「使用者是否設定過 OCR 後端」應該讀這個欄位，不是
+    /// `ocrDefaultBackend`（PsychQuant/pdf-to-latex-swift#11）。
+    public var ocrDefaultBackendOverride: String?
 
     public init(
         available: [String] = [],
@@ -28,7 +39,8 @@ public struct AIConfig: Codable, Sendable, Equatable {
         ocrHosts: [String: String] = [:],
         ocrDefaultHost: String? = nil,
         ocrDefaultModel: String = "glm-ocr",
-        ocrDefaultBackend: String = "ollama"
+        ocrDefaultBackend: String = "ollama",
+        ocrDefaultBackendOverride: String? = nil
     ) {
         self.available = available
         self.transcription = transcription
@@ -37,6 +49,7 @@ public struct AIConfig: Codable, Sendable, Equatable {
         self.ocrDefaultHost = ocrDefaultHost
         self.ocrDefaultModel = ocrDefaultModel
         self.ocrDefaultBackend = ocrDefaultBackend
+        self.ocrDefaultBackendOverride = ocrDefaultBackendOverride
     }
 
     // MARK: - Backward-compatible Decoding
@@ -44,6 +57,7 @@ public struct AIConfig: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case available, transcription, agent
         case ocrHosts, ocrDefaultHost, ocrDefaultModel, ocrDefaultBackend
+        case ocrDefaultBackendOverride
     }
 
     public init(from decoder: Decoder) throws {
@@ -55,6 +69,9 @@ public struct AIConfig: Codable, Sendable, Equatable {
         self.ocrDefaultHost = try c.decodeIfPresent(String.self, forKey: .ocrDefaultHost)
         self.ocrDefaultModel = try c.decodeIfPresent(String.self, forKey: .ocrDefaultModel) ?? "glm-ocr"
         self.ocrDefaultBackend = try c.decodeIfPresent(String.self, forKey: .ocrDefaultBackend) ?? "ollama"
+        // 刻意不 fallback 到 .ocrDefaultBackend：那個 key 可能是無關命令寫入的預設值，
+        // 不代表使用者真的設定過（#11 的根因）。
+        self.ocrDefaultBackendOverride = try c.decodeIfPresent(String.self, forKey: .ocrDefaultBackendOverride)
     }
 
     // MARK: - Default Config Path
@@ -178,6 +195,18 @@ public struct AIConfig: Codable, Sendable, Equatable {
         } catch {
             return false
         }
+    }
+
+    // MARK: - OCR Backend Setting
+
+    /// 使用者明確設定 OCR 預設後端的入口（PsychQuant/pdf-to-latex-swift#11）。
+    /// 同時更新 `ocrDefaultBackendOverride`（讓讀取端能區分「使用者設定過」與「只是預設值」）
+    /// 與舊欄位 `ocrDefaultBackend`（維持與依賴舊欄位的既有讀取端相容，例如 `config ocr list`）。
+    /// 呼叫端（如 macdoc 的 `config ocr set-backend`）應該先 `AIConfig.load()`、呼叫本方法、
+    /// 再 `save()`——本方法只改記憶體中的值，不做任何驗證或落地。
+    public mutating func setOCRDefaultBackend(_ backend: String) {
+        ocrDefaultBackendOverride = backend
+        ocrDefaultBackend = backend
     }
 
     // MARK: - OCR Host Resolution
