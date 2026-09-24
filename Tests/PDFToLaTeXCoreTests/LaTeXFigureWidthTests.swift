@@ -378,6 +378,26 @@ final class LaTeXFigureWidthTests: XCTestCase {
         }
     }
 
+    /// comment 套件的 `\end{comment}` 必須獨佔一行（pdflatex 實測）：行中那個不結束，
+    /// 其後的假 marker 與 `\includegraphics` 仍在註解內。
+    func testInlineEndCommentDoesNotEndTheCommentEnvironment() throws {
+        try writeManifest(pages: [(12, 612), (99, 612)])
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.12, 0.08, 0.68, 0.31])])
+        try writeResponse("pages-099-100.json", figures: [(99, "p012-fig01", [0.1, 0.1, 0.2, 0.2])])
+        try writeImage("figures/p012-fig01.png")
+        let block = """
+        \\begin{comment}
+        Example: \\end{comment}
+        %% === Page 99 ===
+        \\includegraphics{figures/p012-fig01.png}
+        \\end{comment}
+        """
+        let source = "%% === Page 12 ===\n\(block)\n\\includegraphics{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\(block)\n\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}")
+        XCTAssertEqual(report.resolutions.map(\.page), [12])
+    }
+
     func testInlineVerbIsNeverRewritten_percentInsideVerbIsNotAComment() throws {
         try writeSpecExample()
         let source = """
