@@ -444,6 +444,15 @@ final class LaTeXNormalizerTests: XCTestCase {
         }
     }
 
+    /// 跨行不會誤判：上一行結尾的反斜線不該影響下一行開頭 `$` 的奇偶判斷（逐行處理，`line` 變數
+    /// 本來就是單行字串，結構上不可能跨行比對——這裡把它寫成明確的迴歸測試）。
+    func testEscapeCurrencyDollars_trailingBackslashOnPreviousLineDoesNotLeakAcrossLines() {
+        let input = "First line ends with backslash\\\nSecond line has $15 unescaped."
+        let (result, count) = LaTeXNormalizer.escapeCurrencyDollars(input)
+        XCTAssertEqual(result, "First line ends with backslash\\\nSecond line has \\$15 unescaped.")
+        XCTAssertEqual(count, 1, "上一行結尾的反斜線不該讓下一行的 $15 被誤判為已跳脫")
+    }
+
     // MARK: - Project-Level Integration
 
     func testNormalizeProject_withExternalPreamble() throws {
