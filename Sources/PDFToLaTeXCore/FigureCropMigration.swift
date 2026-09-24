@@ -12,8 +12,14 @@ public struct FigureMigrationOutcome: Sendable, Equatable {
         /// responses 裡登記的 figure 數量（不是實際裁切成功的數量——裁切失敗的仍計入，原因見
         /// `notes`，與 `postProcessPage` 的既有回報方式相同）。
         case migrated(figuresProcessed: Int)
-        /// 呼叫過 `postProcessPage`，但沒有任何改動：這一頁本來就沒有 figure，或引用早就是
-        /// 目前這輪會寫出的樣子（已經遷移過，重跑是冪等的）。
+        /// 呼叫過 `postProcessPage`，但這一頁的 `tex/page-NNNN.tex` **文字內容**沒有改動：這一頁
+        /// 本來就沒有 figure，或引用早就是目前這輪會寫出的樣子（已經遷移過，重跑是冪等的）。
+        ///
+        /// **`.unchanged` 只保證 tex 文字沒變，不保證磁碟上完全沒有任何動作**：`postProcessPage`
+        /// 每次都會重新裁切一次（`cropFigures` 本身無條件執行），所以即使引用文字不變，裁切檔
+        /// 仍可能被重寫（例如先前被誤刪，這一輪會自動補回來）。裁切失敗、id 不安全等原因造成
+        /// 「沒有東西可裁切所以文字也沒變」時，原因記在 `notes`，不會反映在 `kind` 本身——這個
+        /// 六類列舉只回答「tex 檔要不要重寫」，細節看 `notes`（Codex R2 審查）。
         case unchanged
         /// `tex/page-NNNN.tex` 不存在或讀不到（這一頁從未被轉寫過，或不屬於這個專案）。
         case noPageTexFile
@@ -43,6 +49,13 @@ extension PageTranscriber {
 
     /// 依 `responses/*.json` 裡登記的 figure bbox，重新裁切成帶頁碼的檔名（`FigureAssetPath.cropped`）
     /// 並改寫 `tex/page-NNNN.tex` 的 `\includegraphics` 引用——不呼叫 AI，純粹重放既有資料。
+    ///
+    /// ## 回傳的六類列舉只涵蓋「逐頁」結果，不是整個操作唯一可能的結果
+    ///
+    /// `throws` 用來表達影響整個操作、與任何單一頁面無關的失敗（`tex/` 目錄列舉失敗、
+    /// `accumulated.tex` 寫入失敗）；這種情況下呼叫端**拿不到已經處理完的 `outcomes`**——不會有
+    /// 部分結果，因為它整個 throw 掉了。六類列舉（`FigureMigrationOutcome.Kind`）只描述「某一頁
+    /// 有沒有被改寫、為什麼沒有」，不是宣稱涵蓋這個函式所有可能的失敗方式（Codex R2 審查）。
     ///
     /// 對每個要求的頁碼，依序：
     /// 1. 讀 `tex/page-NNNN.tex` 目前的內容（找不到 → `.noPageTexFile`）；
@@ -128,7 +141,7 @@ extension PageTranscriber {
         }
 
         if !pageNumbers.isEmpty {
-            let allPages = Self.allExistingPageNumbers(texDir: texDir)
+            let allPages = try Self.allExistingPageNumbers(texDir: texDir)
             let rebuilt = rebuildAccumulated(pageNumbers: allPages, texDir: texDir, projectRoot: project.root)
             try rebuilt.write(
                 to: project.root.appendingPathComponent("accumulated.tex"), atomically: true, encoding: .utf8
@@ -141,9 +154,17 @@ extension PageTranscriber {
     /// 掃 `texDir` 底下所有 `page-NNNN.tex` 檔，回傳排序過的頁碼——專案「實際擁有」的全部頁面，
     /// 不是這次遷移要求的子集。重建 `accumulated.tex` 一定要用這份清單，見
     /// `migrateFigureCrops` 文件裡「為什麼是所有既有頁面」的說明。
-    private static func allExistingPageNumbers(texDir: URL) -> [Int] {
-        let files = (try? FileManager.default.contentsOfDirectory(at: texDir, includingPropertiesForKeys: nil)) ?? []
-        guard let regex = try? NSRegularExpression(pattern: #"^page-(\d+)\.tex$"#) else { return [] }
+    ///
+    /// ## 目錄不存在 vs 列舉失敗（Codex R2 審查）
+    ///
+    /// `texDir` 真的不存在時回傳空陣列——這是合法狀態（專案從未渲染過任何頁面）。但目錄**存在**、
+    /// 列舉卻失敗（權限、I/O 錯誤）時**往外拋錯，不吞成空清單**：吞掉的話，
+    /// `migrateFigureCrops` 會拿著這份假的「一頁都沒有」清單去重建 `accumulated.tex`，用一份
+    /// 沒有任何頁面正文的內容覆寫掉原本完好的總文件——這比「不重建」還糟。
+    private static func allExistingPageNumbers(texDir: URL) throws -> [Int] {
+        guard FileManager.default.fileExists(atPath: texDir.path) else { return [] }
+        let files = try FileManager.default.contentsOfDirectory(at: texDir, includingPropertiesForKeys: nil)
+        let regex = try NSRegularExpression(pattern: #"^page-(\d+)\.tex$"#)
         var numbers: [Int] = []
         for file in files {
             let name = file.lastPathComponent

@@ -331,4 +331,47 @@ final class FigureCropMigrationTests: XCTestCase {
             "裁切檔被刪掉後重跑應該自動補回來"
         )
     }
+
+    // MARK: - Codex R2 回歸：列舉 tex/ 目錄失敗不能被吞成空清單
+
+    /// `tex/` 目錄列舉失敗（這裡用「同名路徑其實是檔案，不是目錄」模擬 I/O 錯誤）時應該整個
+    /// throw，不能把失敗吞成空清單再拿去重建 accumulated.tex——那樣會用沒有任何頁面正文的內容
+    /// 覆寫掉原本完好的總文件，比「乾脆不重建」還糟。
+    func testDirectoryListingFailureThrowsInsteadOfOverwritingAccumulatedWithEmptyContent() throws {
+        let image = try writePageImage(page: 5, color: Self.red)
+        try writePageTex(page: 5, content: "\\includegraphics{figures/fig1.png}")
+        try writeResponses([PageResult(
+            page: 5, latex: "", figures: [FigureRegion(id: "fig1", bbox: [0.1, 0.1, 0.4, 0.3], caption: nil)],
+            confidence: nil, notes: nil
+        )])
+        let project = makeProject(pages: [
+            PageRecord(number: 5, width: 612, height: 792, rotation: 0, renderedImagePath: image, renderedDPI: nil),
+        ])
+        let transcriber = PageTranscriber()
+        _ = try transcriber.migrateFigureCrops(project: project, pageNumbers: [5])
+        let goodAccumulated = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertFalse(goodAccumulated.isEmpty)
+
+        // 把 tex/ 換成同名的「檔案」：路徑存在，但不是目錄——列舉時會丟錯。
+        let texDirURL = projectDir.appendingPathComponent("tex")
+        try FileManager.default.removeItem(at: texDirURL)
+        try "not a directory".write(to: texDirURL, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try transcriber.migrateFigureCrops(project: project, pageNumbers: [5]))
+
+        let afterFailure = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertEqual(afterFailure, goodAccumulated, "列舉目錄失敗時不該把 accumulated.tex 換成空內容")
+    }
+
+    /// `tex/` 目錄真的不存在（專案從未渲染過任何頁面）是合法狀態，不該 throw；只是所有要求的頁面
+    /// 都會落在 `.noPageTexFile`，也不會有 accumulated.tex 可重建成有內容的東西。
+    func testMissingTexDirectoryIsNotTreatedAsAnError() throws {
+        let project = makeProject(pages: [])
+        let outcomes = try PageTranscriber().migrateFigureCrops(project: project, pageNumbers: [1])
+        XCTAssertEqual(outcomes, [FigureMigrationOutcome(page: 1, kind: .noPageTexFile)])
+    }
 }
