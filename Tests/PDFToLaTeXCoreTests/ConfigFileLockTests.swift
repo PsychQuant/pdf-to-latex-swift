@@ -109,6 +109,25 @@ final class ConfigFileLockTests: XCTestCase {
         }
     }
 
+    /// 鎖檔權限無法設為 0600 時，必須在任何取鎖之前帶原 errno 拋出（macdoc#204）。
+    func testFailedFchmodThrowsWithItsErrnoBeforeLocking() throws {
+        try withTempConfigPath { path in
+            var attempts = 0
+            XCTAssertThrowsError(
+                try ConfigFileLock.withLock(
+                    forConfigAt: path, pollInterval: 0.01, timeout: 1,
+                    acquire: { fd, operation in attempts += 1; return flock(fd, operation) },
+                    setMode: { _, _ in errno = EPERM; return -1 }
+                ) { XCTFail("鎖檔權限無法確保時不能執行 body") }
+            ) { error in
+                let nsError = error as NSError
+                XCTAssertEqual(nsError.domain, "PDFToLaTeXCore.ConfigFileLock")
+                XCTAssertEqual(nsError.code, Int(EPERM))
+            }
+            XCTAssertEqual(attempts, 0, "權限失敗後不能再嘗試取鎖")
+        }
+    }
+
     func testInterruptedFlockIsRetriedAndContentionIsPolled() throws {
         try withTempConfigPath { path in
             var attempts = 0
