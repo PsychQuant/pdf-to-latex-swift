@@ -133,6 +133,7 @@ public enum PromptBuilder {
         - 圖形、示意圖、照片等無法用 LaTeX 表示的 → 在 latex 中用 \\includegraphics{figures/pXXX-figYY.png}
         - 在 figures 陣列標出 bounding box（正規化座標 0-1，原點左上角）
         - bbox: [x, y, width, height]
+        - \\includegraphics 不要加 width、height、scale 等尺寸選項：工具會依 bbox 補上寬度（前文中已有的寬度選項是工具加的，不要照抄）
 
         圖片檔案路徑：
         \(zip(pageNumbers, imagePaths).map { "第 \($0.0) 頁: \($0.1)" }.joined(separator: "\n"))
