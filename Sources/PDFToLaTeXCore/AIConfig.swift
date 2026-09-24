@@ -80,24 +80,56 @@ public struct AIConfig: Codable, Sendable, Equatable {
 
     // MARK: - Save
 
+    /// Persists this config, merging it into whatever is currently on disk
+    /// so that fields owned by other writers (such as `document`, owned by
+    /// ooxml-swift's `DocumentProfileStore`) are preserved.
+    ///
+    /// The read -> merge -> atomic-write critical section is wrapped in
+    /// `ConfigFileLock` (macdoc#204) so a concurrent writer to the same
+    /// `~/.config/macdoc/config.json` cannot interleave with this one and
+    /// have its update silently discarded. See `ConfigFileLock` for the
+    /// cross-process protocol, which must stay identical to the one used
+    /// by ooxml-swift's `DocumentProfileStore.updateDocument`.
     public func save(to url: URL? = nil) throws {
         let configURL = url ?? AIConfig.defaultConfigURL
         let known = try Self.configurationObject(from: JSONEncoder().encode(self))
-        var merged: [String: Any] = [:]
-        if FileManager.default.fileExists(atPath: configURL.path) {
-            // Read at save time: other consumers own fields such as document.
-            // Invalid existing data must fail before any replacement occurs.
-            merged = try Self.configurationObject(from: Data(contentsOf: configURL))
+
+        try FileManager.default.createDirectory(
+            at: configURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+
+        try ConfigFileLock.withLock(forConfigAt: configURL.path) {
+            var merged: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: configURL.path) {
+                // Read at save time: other consumers own fields such as document.
+                // Invalid existing data must fail before any replacement occurs.
+                //
+                // Known limitation (macdoc#194): this read follows symlinks
+                // (Foundation's `Data(contentsOf:)` has no O_NOFOLLOW option),
+                // so a symlink planted at configURL's path could redirect the
+                // read to an attacker-chosen file. Doing this safely would
+                // need a hand-rolled open(O_NOFOLLOW)+fstat+read instead of
+                // `Data(contentsOf:)`; deferred as out of scope here since
+                // `~/.config/macdoc/` is a single-user, non-multi-tenant
+                // directory and the subsequent atomic write (rename()) does
+                // not follow a symlink at the destination path — it replaces
+                // the link itself, so the write side is not similarly exposed.
+                merged = try Self.configurationObject(from: Data(contentsOf: configURL))
+            }
+            // Removing every owned key first also honors optional fields cleared
+            // to nil; merging only encoded values would resurrect the old value.
+            for key in CodingKeys.allCases {
+                merged.removeValue(forKey: key.rawValue)
+            }
+            merged.merge(known) { _, updated in updated }
+            let data = try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: configURL, options: .atomic)
+            // .atomic writes via a temp file + rename, whose permissions
+            // follow the process umask rather than the config's own
+            // 0600 contract, so set it explicitly afterwards (macdoc#194).
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
         }
-        // Removing every owned key first also honors optional fields cleared
-        // to nil; merging only encoded values would resurrect the old value.
-        for key in CodingKeys.allCases {
-            merged.removeValue(forKey: key.rawValue)
-        }
-        merged.merge(known) { _, updated in updated }
-        let data = try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys])
-        try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: configURL, options: .atomic)
     }
 
     private static func configurationObject(from data: Data) throws -> [String: Any] {
