@@ -381,6 +381,10 @@ final class FigureCropMigrationTests: XCTestCase {
     /// 前置檢查，改成直接嘗試列舉、只把操作本身丟出的 `.fileReadNoSuchFile` 當空清單，這裡驗證
     /// 這個情境下拋出的是別的錯誤（不是 `.fileReadNoSuchFile`），因此會 throw、不會誤判成空清單
     /// 去覆寫 accumulated.tex。
+    ///
+    /// 已知限制（R5 審查）：這個測試靠 `chmod 000` 模擬「權限被拒」，隱含假設執行的程序不是
+    /// root（root 會直接繞過 POSIX 權限檢查，讓這個情境不成立）。這是 Unix 權限類測試的標準
+    /// 前提，CI 與一般開發環境本來就不會以 root 跑測試；沒有另外加執行身分偵測或 skip 邏輯。
     func testSymlinkedTexDirectoryWithInaccessibleParentThrowsInsteadOfAppearingEmpty() throws {
         let image = try writePageImage(page: 5, color: Self.red)
         try writePageTex(page: 5, content: "\\includegraphics{figures/fig1.png}")
@@ -507,5 +511,39 @@ final class FigureCropMigrationTests: XCTestCase {
         )
         XCTAssertTrue(accumulated.contains("Canonical page two."))
         XCTAssertFalse(accumulated.contains("Non-canonical only."), "非標準檔名完全不該被算進重建")
+    }
+
+    /// R5 審查建議：不靠競態或權限環境，用「標準檔名、會被列舉到，但內容不是合法 UTF-8」
+    /// 穩定重現「非空清單、讀取失敗、不覆寫既有總文件」——這是
+    /// `testRebuildAccumulatedThrowsWhenAPageCannotBeRead`（測 helper 本身）在 migrateFigureCrops
+    /// 整合層級的對應驗證。
+    func testInvalidUTF8PageFileThrowsWithoutOverwritingAccumulated() throws {
+        let image = try writePageImage(page: 5, color: Self.red)
+        try writePageTex(page: 5, content: "\\includegraphics{figures/fig1.png}")
+        try writeResponses([PageResult(
+            page: 5, latex: "", figures: [FigureRegion(id: "fig1", bbox: [0.1, 0.1, 0.4, 0.3], caption: nil)],
+            confidence: nil, notes: nil
+        )])
+        let project = makeProject(pages: [
+            PageRecord(number: 5, width: 612, height: 792, rotation: 0, renderedImagePath: image, renderedDPI: nil),
+        ])
+        let transcriber = PageTranscriber()
+        _ = try transcriber.migrateFigureCrops(project: project, pageNumbers: [5])
+        let goodAccumulated = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertFalse(goodAccumulated.isEmpty)
+
+        // 另外加一頁：檔名標準、會被列舉到，但內容是非法 UTF-8 位元組——不是這次要求遷移的頁碼，
+        // 只會在 rebuildAccumulated 重建全部既有頁面時被讀到。
+        let invalidUTF8 = Data([0xFF, 0xFE, 0x00, 0x01])
+        try invalidUTF8.write(to: projectDir.appendingPathComponent("tex/page-0006.tex"))
+
+        XCTAssertThrowsError(try transcriber.migrateFigureCrops(project: project, pageNumbers: [5]))
+
+        let afterFailure = try String(
+            contentsOf: projectDir.appendingPathComponent("accumulated.tex"), encoding: .utf8
+        )
+        XCTAssertEqual(afterFailure, goodAccumulated, "有一頁讀取失敗時不該覆寫既有 accumulated.tex")
     }
 }
