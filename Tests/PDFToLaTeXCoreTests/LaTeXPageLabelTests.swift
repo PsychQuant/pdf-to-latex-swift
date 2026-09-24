@@ -147,6 +147,20 @@ final class LaTeXPageLabelTests: XCTestCase {
             .contains("\\chapter*{Preface}\n\\setcounter{page}{1}\n"))
     }
 
+    /// 「與實體頁號相同」必須涵蓋每個 marker 的頁號（Codex R2 MEDIUM）：只有部分頁面有 label、而現有的
+    /// 都等於頁號時，仍是 label 模式，缺 label 的頁照常回報、不退回實體頁序。
+    func testIncompleteTrivialLabelsStillReportMissingPages() {
+        let input = "\\begin{document}\n%% === Page 1 ===\nCover.\n%% === Page 2 ===\n\\chapter{Intro}\nText.\n\\end{document}"
+        let report = LaTeXNormalizer.applyPageCounters(input, pageLabels: [1: "1"])
+        XCTAssertEqual(report.result, input.replacingOccurrences(
+            of: "%% === Page 1 ===\n", with: "%% === Page 1 ===\n\\setcounter{page}{1}\n"
+        ))
+        XCTAssertEqual(report.notes, [
+            PageCounterNote(line: 2, kind: .counterInserted(page: 1)),
+            PageCounterNote(line: 5, kind: .pageLabelMissing(page: 2)),
+        ])
+    }
+
     /// label 與原始碼的切換指令不一致時以 label 為準：在指令之後補上 `\pagenumbering`。
     func testLabelOverridesADisagreeingSourceSwitch() {
         let input = "\\begin{document}\n%% === Page 4 ===\n\\mainmatter\nText.\n\\end{document}"
