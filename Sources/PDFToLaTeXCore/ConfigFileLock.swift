@@ -19,7 +19,9 @@ import Foundation
 /// - Lock file path: `<config path>.lock` (sibling of the config file).
 /// - Open with `O_CREAT | O_RDWR | O_CLOEXEC`, mode `0o600`.
 /// - Acquire with `flock(fd, LOCK_EX | LOCK_NB)`, polled every 50 ms.
-/// - Give up and throw after 5 seconds of polling.
+/// - Give up and throw after 5 seconds of polling, measured on a monotonic
+///   clock. Only EWOULDBLOCK/EAGAIN (contention) is polled and EINTR
+///   retried at once; any other errno is thrown immediately with that errno.
 /// - Hold the lock across the *entire* read -> merge -> atomic-write
 ///   critical section, not just the write.
 /// - Release with `flock(fd, LOCK_UN)`, then close the file descriptor.
@@ -43,12 +45,13 @@ enum ConfigFileLock {
 
     /// Acquires an exclusive advisory lock on `<path>.lock`, runs `body`
     /// while holding it, then releases the lock (the lock file itself is
-    /// never deleted). `pollInterval`/`timeout` are injectable for tests;
-    /// production callers should use the defaults.
+    /// never deleted). `pollInterval`/`timeout`/`acquire` are injectable for
+    /// tests; production callers should use the defaults.
     static func withLock<T>(
         forConfigAt path: String,
         pollInterval: TimeInterval = ConfigFileLock.defaultPollInterval,
         timeout: TimeInterval = ConfigFileLock.defaultTimeout,
+        acquire: (Int32, Int32) -> Int32 = { flock($0, $1) },
         _ body: () throws -> T
     ) throws -> T {
         let lockPath = path + ".lock"
@@ -64,15 +67,23 @@ enum ConfigFileLock {
         // to open() above is only a request, not a guarantee.
         _ = fchmod(fd, 0o600)
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while true {
-            if flock(fd, LOCK_EX | LOCK_NB) == 0 {
-                break
+        // The budget runs on a monotonic clock: a wall-clock change cannot
+        // stretch or cut the wait.
+        let start = DispatchTime.now().uptimeNanoseconds
+        let budget = UInt64(max(0, timeout) * 1_000_000_000)
+        while acquire(fd, LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            // Only contention is waited out; EINTR is retried at once. Any
+            // other failure is not contention and is reported immediately.
+            guard code == EWOULDBLOCK || code == EAGAIN || code == EINTR else {
+                throw NSError(
+                    domain: "PDFToLaTeXCore.ConfigFileLock", code: Int(code),
+                    userInfo: [NSLocalizedDescriptionKey: "無法鎖定鎖檔: \(lockPath)（errno \(code)）"])
             }
-            if Date() >= deadline {
+            if DispatchTime.now().uptimeNanoseconds - start >= budget {
                 throw TimeoutError(path: lockPath)
             }
-            Thread.sleep(forTimeInterval: pollInterval)
+            if code != EINTR { Thread.sleep(forTimeInterval: pollInterval) }
         }
         defer { flock(fd, LOCK_UN) }
 
