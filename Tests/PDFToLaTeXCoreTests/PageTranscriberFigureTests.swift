@@ -318,4 +318,67 @@ final class PageTranscriberFigureTests: XCTestCase {
             XCTAssertEqual(again.result, "%% === Page 18 ===\n" + transcribed.latex, options)
         }
     }
+
+    // MARK: - #221 resolvedPageImagePath：AI 回傳批次外頁碼時不能裁到錯的頁面圖
+
+    private func record(_ number: Int, image: String?) -> PageRecord {
+        PageRecord(number: number, width: 612, height: 792, rotation: 0, renderedImagePath: image, renderedDPI: nil)
+    }
+
+    /// 批次內的一般情況：直接用這一頁自己的圖。
+    func testResolvedPageImagePathFindsPageWithinManifest() {
+        let pages = [record(5, image: "pages/page-0005.png"), record(6, image: "pages/page-0006.png")]
+        XCTAssertEqual(PageTranscriber.resolvedPageImagePath(forPage: 6, in: pages), "pages/page-0006.png")
+    }
+
+    /// AI 回傳的頁碼不在這一批送出去的頁面裡（批次外頁碼），但 manifest 裡有這一頁、也渲染過：
+    /// 要用它自己的圖，不能 fallback 成批次裡任何別的頁面圖（#221 的核心場景）。
+    func testResolvedPageImagePathFindsPageOutsideRequestedBatch() {
+        // 模擬批次只送出 [1, 2] 的 imagePaths，但 AI 回應裡混進了第 7 頁（批次外頁碼）。
+        // manifest 涵蓋整本書，第 7 頁早就渲染過、有自己的圖。
+        let manifestPages = [
+            record(1, image: "pages/page-0001.png"),
+            record(2, image: "pages/page-0002.png"),
+            record(7, image: "pages/page-0007.png"),
+        ]
+        let resolved = PageTranscriber.resolvedPageImagePath(forPage: 7, in: manifestPages)
+        XCTAssertEqual(resolved, "pages/page-0007.png")
+        XCTAssertNotEqual(resolved, "pages/page-0001.png", "不可 fallback 到批次第一張圖")
+    }
+
+    /// manifest 裡完全沒有這個頁碼（徹底幻覺）：回傳 nil，讓呼叫端不裁切、記 note。
+    func testResolvedPageImagePathReturnsNilWhenPageNotInManifest() {
+        let pages = [record(1, image: "pages/page-0001.png"), record(2, image: "pages/page-0002.png")]
+        XCTAssertNil(PageTranscriber.resolvedPageImagePath(forPage: 99, in: pages))
+    }
+
+    /// manifest 裡有這一頁的紀錄，但還沒渲染過（renderedImagePath 是 nil）：同樣回傳 nil，
+    /// 不能誤用別頁的圖頂替。
+    func testResolvedPageImagePathReturnsNilWhenPageNotYetRendered() {
+        let pages = [record(1, image: "pages/page-0001.png"), record(2, image: nil)]
+        XCTAssertNil(PageTranscriber.resolvedPageImagePath(forPage: 2, in: pages))
+    }
+
+    /// 端對端：批次外頁碼進到 postProcessPage 之後，裁出來的圖必須來自它自己的頁面圖，
+    /// 顏色不能是批次內其他頁面的顏色（直接驗證裁切結果，不只是路徑字串）。
+    func testOutOfBatchPageCropsFromItsOwnImageNotTheBatchFirstImage() throws {
+        // 批次請求的是第 1 頁（紅），但 AI 回應裡夾帶第 7 頁（藍）——批次外頁碼。
+        let batchFirstImage = try writePageImage(page: 1, color: Self.red)
+        let ownImage = try writePageImage(page: 7, color: Self.blue)
+        let manifestPages = [record(1, image: batchFirstImage), record(7, image: ownImage)]
+
+        let resolved = PageTranscriber.resolvedPageImagePath(forPage: 7, in: manifestPages)
+        XCTAssertEqual(resolved, ownImage)
+
+        let result = process(
+            page: 7, latex: "\\includegraphics{figures/fig1.png}",
+            figures: [("fig1", [0.1, 0.1, 0.4, 0.4])], image: resolved
+        )
+        XCTAssertTrue(result.notes.isEmpty, "resolvedPageImagePath 找得到圖時不應該有 note")
+        let cropped = try inspect("figures/p007-fig1.png")
+        XCTAssertTrue(
+            cropped.color.b > 200 && cropped.color.r < 50,
+            "裁出來的內容必須來自第 7 頁自己的圖（藍），不是批次第一張（紅）: \(cropped.color)"
+        )
+    }
 }
