@@ -165,11 +165,16 @@ public struct PageTranscriber: Sendable {
                 break
             }
 
+            // 這一批實際送給 AI 的頁碼所對應的 manifest 紀錄——AI 回傳的頁碼若不在這批裡，
+            // 這批回應的 bbox 不是分析那張圖得出的，就算 manifest 裡剛好有那頁的渲染圖也不可信任
+            // （PsychQuant/macdoc#221 第二輪審查）。
+            let batchPageRecords = Self.batchRestrictedPageRecords(project.manifest.pages, batchPages: batchPages)
+
             // Post-process 每一頁
             for pageResult in response.pages {
                 // 1. 裁切 figures（帶頁碼前綴）、LaTeX 路徑改寫成裁切檔並補寬度（#208、#209）
-                let pageImagePath = Self.resolvedPageImagePath(forPage: pageResult.page, in: project.manifest.pages)
-                let pageWidth = project.manifest.pages.first(where: { $0.number == pageResult.page })?.width
+                let pageImagePath = Self.resolvedPageImagePath(forPage: pageResult.page, in: batchPageRecords)
+                let pageWidth = batchPageRecords.first(where: { $0.number == pageResult.page })?.width
                 let processed = Self.postProcessPage(
                     pageResult, pageImagePath: pageImagePath, pageWidth: pageWidth, projectRoot: project.root
                 )
@@ -399,19 +404,30 @@ public struct PageTranscriber: Sendable {
         let notes: [String]
     }
 
-    /// 依 manifest 找出某一頁的頁面圖路徑，供裁切 figure 用（PsychQuant/macdoc#221）。
+    /// 依給定的頁面清單找出某一頁的頁面圖路徑，供裁切 figure 用（PsychQuant/macdoc#221）。
     ///
-    /// 直接以 `PageRecord.number` 在**整份 manifest**（不侷限於目前批次）裡查，不是在這一批
-    /// 送出去的 `imagePaths` 裡用字串比對找。AI 回傳的頁碼如果不在這一批裡（批次外頁碼），
-    /// manifest 裡這一頁本來就有自己的 `renderedImagePath`（前提是它已經被渲染過），照樣能查到
-    /// 正確的圖——不會、也絕不能 fallback 到批次裡任何一張別的頁面圖，那是錯的內容，裁出來的
-    /// figure 卻頂著這一頁的頁碼命名。
+    /// 直接以 `PageRecord.number` 在 `pages` 裡查，不是用字串比對找。找不到（`pages` 裡沒有這個
+    /// 頁碼，或這一頁還沒渲染過、`renderedImagePath` 是 nil）時回傳 nil；呼叫端（`cropFigures`）
+    /// 在 `pageImagePath` 為 nil 時本來就會記一筆 note、不裁切、引用維持原樣（與 #208 對裁切失敗
+    /// 的處理一致），這裡不需要另外處理。
     ///
-    /// 找不到（manifest 裡完全沒有這個頁碼，或這一頁還沒渲染過、`renderedImagePath` 是 nil）時
-    /// 回傳 nil；呼叫端（`cropFigures`）在 `pageImagePath` 為 nil 時本來就會記一筆 note、不裁切、
-    /// 引用維持原樣（與 #208 對裁切失敗的處理一致），這裡不需要另外處理。
-    static func resolvedPageImagePath(forPage page: Int, in manifestPages: [PageRecord]) -> String? {
-        manifestPages.first(where: { $0.number == page })?.renderedImagePath
+    /// `pages` 給整份 manifest 還是限制在某個子集，由呼叫端決定——這個函式本身不知道、也不管
+    /// 「批次」是什麼。兩個呼叫端的選擇不同（PsychQuant/macdoc#221 第二輪審查釐清）：
+    /// - `transcribe()` 傳 `batchRestrictedPageRecords(...)`：AI 回傳的頁碼如果不在**這一批**送
+    ///   給 AI 的頁碼裡，就算 manifest 裡剛好有那一頁的渲染圖，這批回應的 bbox 也不是分析那張圖
+    ///   得出的，不可信任、不能裁——找不到就是找不到，不會退而求其次去查其他頁。
+    /// - `migrateFigureCrops`（不呼叫 AI 的遷移入口）傳整份 `project.manifest.pages`：它沒有
+    ///   「批次」這個概念，bbox 來自 `responses/*.json` 裡已經跟頁碼綁定的舊資料，查整份 manifest
+    ///   是正確且必要的。
+    static func resolvedPageImagePath(forPage page: Int, in pages: [PageRecord]) -> String? {
+        pages.first(where: { $0.number == page })?.renderedImagePath
+    }
+
+    /// 把 `manifestPages` 限制在 `batchPages` 這個子集——`transcribe()` 專用，見
+    /// `resolvedPageImagePath` 文件裡「兩個呼叫端的選擇不同」。抽成獨立函式是因為 `transcribe()`
+    /// 本身呼叫真正的 AI CLI，無法單元測試；這個限制邏輯本身可以獨立測試批次外頁碼確實被排除。
+    static func batchRestrictedPageRecords(_ manifestPages: [PageRecord], batchPages: [Int]) -> [PageRecord] {
+        manifestPages.filter { batchPages.contains($0.number) }
     }
 
     /// 一頁 AI 回應的後處理（不呼叫 AI，可單獨測試）：
