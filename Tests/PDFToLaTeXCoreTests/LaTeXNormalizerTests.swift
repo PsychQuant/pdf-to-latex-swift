@@ -401,6 +401,49 @@ final class LaTeXNormalizerTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
 
+    // MARK: - Currency Dollar Escaping — 反斜線奇偶邊界（PsychQuant/pdf-to-latex-swift#4）
+
+    /// 前導反斜線數量從 0 到 4，逐一驗證奇偶判斷：偶數（含 0）＝未跳脫、要補一個反斜線；
+    /// 奇數＝已跳脫、原樣保留、不計入跳脫數。
+    func testEscapeCurrencyDollars_backslashParityBoundary() {
+        for backslashCount in 0...4 {
+            let backslashes = String(repeating: "\\", count: backslashCount)
+            let input = "Value: \(backslashes)$15 end."
+            let (result, count) = LaTeXNormalizer.escapeCurrencyDollars(input)
+            if backslashCount.isMultiple(of: 2) {
+                // 偶數（含 0）：未跳脫，補一個反斜線，原有反斜線不變。
+                let expected = "Value: \(backslashes)\\$15 end."
+                XCTAssertEqual(result, expected, "backslashCount=\(backslashCount) 應視為未跳脫")
+                XCTAssertEqual(count, 1, "backslashCount=\(backslashCount) 應計為 1 次跳脫")
+            } else {
+                // 奇數：最後一個反斜線已跳脫這個 $，原樣保留、不計數。
+                XCTAssertEqual(result, input, "backslashCount=\(backslashCount) 應視為已跳脫，維持原樣")
+                XCTAssertEqual(count, 0, "backslashCount=\(backslashCount) 不應計入跳脫數")
+            }
+        }
+    }
+
+    /// 兩個反斜線是 LaTeX 換行指令 `\\`，跟它後面的 `$` 是否跳脫無關——`$` 仍算未跳脫，要補一個反斜線，
+    /// 原本的換行指令維持兩個反斜線不變（issue #4 明確舉的例子）。
+    func testEscapeCurrencyDollars_lineBreakThenUnescapedDollarIsStillEscaped() {
+        let input = "End of line\\\\$15 continues."
+        let (result, count) = LaTeXNormalizer.escapeCurrencyDollars(input)
+        XCTAssertEqual(result, "End of line\\\\\\$15 continues.")
+        XCTAssertEqual(count, 1)
+    }
+
+    /// 已跳脫的重複執行本身要冪等（奇數反斜線的一般化版本，涵蓋 1 到 5 個反斜線）。
+    func testEscapeCurrencyDollars_idempotentAcrossBackslashCounts() {
+        for backslashCount in 0...5 {
+            let backslashes = String(repeating: "\\", count: backslashCount)
+            let input = "Value: \(backslashes)$15 end."
+            let (first, _) = LaTeXNormalizer.escapeCurrencyDollars(input)
+            let (second, count2) = LaTeXNormalizer.escapeCurrencyDollars(first)
+            XCTAssertEqual(first, second, "backslashCount=\(backslashCount) 第二次處理不應再變動")
+            XCTAssertEqual(count2, 0, "backslashCount=\(backslashCount) 第二次處理不應再計入跳脫數")
+        }
+    }
+
     // MARK: - Project-Level Integration
 
     func testNormalizeProject_withExternalPreamble() throws {
