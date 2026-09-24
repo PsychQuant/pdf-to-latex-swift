@@ -347,6 +347,56 @@ struct LaTeXSourceScan {
         "alignat", "alignat*", "flalign", "flalign*", "gather", "gather*", "multline", "multline*",
     ]
 
+    /// 對齊環境（封閉列舉，PsychQuant/macdoc#215，Codex R7）。表格裡的儲存格與沒加大括號的參數
+    /// （如 `\multicolumn{1}` 之後的 `c`）在行的層次判斷不了，跨頁去重在這裡一律不刪。
+    static let alignmentEnvironments: Set<String> = [
+        "tabular", "tabular*", "tabularx", "tabulary", "longtable", "longtable*", "supertabular",
+        "supertabular*", "xtabular", "xtabular*", "mpsupertabular", "tabu", "longtabu", "array",
+        "NiceTabular", "NiceTabular*", "NiceArray", "tblr", "longtblr", "talltblr",
+    ]
+
+    /// 每一行開頭是否在 `names` 列出的環境裡。只看作用中的程式碼的 `\begin{…}`／`\end{…}`；巢狀照算。
+    /// 配對不一致（關閉一個沒開的、或 body 結束時還開著）時回傳 nil：無法判斷任何一行。
+    func environmentAtLineStarts(_ names: Set<String>) -> [Bool]? {
+        var stack: [String] = []
+        var result = [Bool](repeating: false, count: lineStarts.count)
+        var line = 0
+        var k = 0
+        while k < units.count {
+            while line + 1 < lineStarts.count && lineStarts[line + 1] <= k {
+                line += 1
+                result[line] = !stack.isEmpty
+            }
+            guard isActive(k), units[k] == U.backslash, k + 1 < units.count, U.isLetter(units[k + 1]) else {
+                k += 1
+                continue
+            }
+            var end = k + 1
+            while end < units.count && U.isLetter(units[end]) { end += 1 }
+            let name = text((k + 1)..<end)
+            guard name == "begin" || name == "end", let argument = readGroupArgument(from: end) else {
+                k = end
+                continue
+            }
+            let environment = argument.text.trimmingCharacters(in: .whitespaces)
+            if names.contains(environment) {
+                if name == "begin" {
+                    stack.append(environment)
+                } else if stack.last == environment {
+                    stack.removeLast()
+                } else {
+                    return nil
+                }
+            }
+            k = argument.range.upperBound
+        }
+        while line + 1 < lineStarts.count {
+            line += 1
+            result[line] = !stack.isEmpty
+        }
+        return stack.isEmpty ? result : nil
+    }
+
     /// 每一行開頭是否在數學模式裡（PsychQuant/macdoc#215，Codex R6）。只看作用中的程式碼（document
     /// body、不在巨集定義內、不是註解或 verbatim）。
     ///

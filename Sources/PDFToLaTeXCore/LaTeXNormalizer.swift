@@ -183,7 +183,7 @@ public struct LaTeXNormalizer: Sendable {
     /// k 行整段結構配對完整、不含條件式（`LaTeXSourceScan.linesAreSelfBalanced`）時，取最大的 k，把頁首
     /// 那 k 行排入計畫，再重新比較，直到沒有重疊。只有「連續的一段」重疊才算重複。
     ///
-    /// ## 否決（封閉列舉，只有這四個；任一成立整段不刪）
+    /// ## 否決（封閉列舉，只有這五個；任一成立整段不刪）
     ///
     /// 1. **不像正文**：段落裡有一行不符 `LaTeXSourceScan.lineLooksLikeProse`（去掉控制序列、註解與空白後
     ///    沒有字母或 CJK 字元，或以 `{ [ } ] &`、`\\` 開頭）。
@@ -192,6 +192,9 @@ public struct LaTeXNormalizer: Sendable {
     /// 3. **前面有控制序列在等參數**：頁尾那段之前最後一行有程式碼的行（略過空行、`%%` 行、已實際刪除的行
     ///    與只有註解的行）以控制序列結尾（`LaTeXSourceScan.lineEndsWithControlSequence`）。
     /// 4. **段落本身以控制序列結尾**：段落最後一行以控制序列結尾，頁首那段就可能是它的參數。
+    /// 5. **分頁在對齊環境裡**：邊界那一行的開頭在 `LaTeXSourceScan.alignmentEnvironments`（`tabular`、
+    ///    `longtable` 等）裡。儲存格與沒加大括號的參數（`\multicolumn{1}` 之後的 `c`）在行的層次判斷
+    ///    不了（Codex R7）。環境配對在整份文件不一致時，整份不刪。
     ///
     /// 為什麼這麼保守：去重是啟發式，AI 在頁尾與頁首重複寫的是正文；文字相同的結構或參數常常是不同的東西 ——
     /// 巢狀列表的內層與外層結尾都是 `\end{itemize}`、`\frac` 的分子與分母都是 `{1}` 或 `x`、`\ifcase` 的
@@ -233,6 +236,7 @@ public struct LaTeXNormalizer: Sendable {
         guard !boundaries.isEmpty else { return ([], []) }
         // nil（數學配對不一致）時否決 2 對每一段都成立；計畫照常排，才能與不否決時比較。
         let mathAtLineStart = scan.mathModeAtLineStarts()
+        let alignmentAtLineStart = scan.environmentAtLineStarts(LaTeXSourceScan.alignmentEnvironments)
 
         // scan 的行與以 LF 切開的行一一對應（lineStarts 也只以 LF 分行）。
         let lines = source.components(separatedBy: "\n")
@@ -258,10 +262,11 @@ public struct LaTeXNormalizer: Sendable {
             return false
         }
 
-        /// 否決 1～4 都不成立。
+        /// 否決 1～5 都不成立。
         func accepted(_ block: [Int], tailBlock: [Int], boundary: Int) -> Bool {
             guard applyVetoes else { return true }
             guard let math = mathAtLineStart, !math[boundary] else { return false }
+            guard let alignment = alignmentAtLineStart, !alignment[boundary] else { return false }
             guard block.allSatisfy({ scan.lineLooksLikeProse($0) }) else { return false }
             guard let first = tailBlock.first, !controlSequenceBefore(first) else { return false }
             guard let last = block.last, scan.lineEndsWithControlSequence(last) != true else { return false }
