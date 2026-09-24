@@ -409,6 +409,9 @@ public struct PageTranscriber: Sendable {
     /// 不裁切（並記入 `notes`）的情況（封閉列舉）：id 不安全（`FigureAssetPath.isSafeID`）；
     /// bbox 不是 4 個數值；同一頁已有另一個 figure 對應到同一個裁切檔（只裁第一個；bbox 不同時
     /// 記一筆，寬度會回報 `ambiguousFigure`）；沒有頁面圖；讀圖、裁切或寫檔失敗。
+    ///
+    /// bbox 有 4 個數值但超出頁面（`LaTeXNormalizer.isValidNormalizedBBox` 不成立）時仍裁切與頁面
+    /// 相交的部分（與先前行為相同，避免缺圖），另記一筆 note；寬度回報 `invalidBoundingBox`。
     static func postProcessPage(
         _ pageResult: PageResult, pageImagePath: String?, pageWidth: Double?, projectRoot: URL
     ) -> PagePostProcessResult {
@@ -454,6 +457,10 @@ public struct PageTranscriber: Sendable {
                     to: projectRoot.appendingPathComponent(path)
                 )
                 written.insert(path)
+                if !LaTeXNormalizer.isValidNormalizedBBox(figure.bbox) {
+                    // 仍保留與頁面相交的部分：不裁的話文件會因缺圖而無法編譯。
+                    notes.append("第 \(page) 頁 \(path) 的 bbox \(figure.bbox) 超出頁面，只裁切與頁面相交的部分（圖可能被截斷），寬度不自動補上")
+                }
             } catch {
                 notes.append("裁切 \(path) 失敗: \(error.localizedDescription)")
             }

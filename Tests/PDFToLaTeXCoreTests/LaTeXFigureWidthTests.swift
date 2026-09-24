@@ -109,6 +109,14 @@ final class LaTeXFigureWidthTests: XCTestCase {
         XCTAssertFalse(resolution.replacedLegacyWidth)
     }
 
+    func testExtensionlessPathWithADotInTheIdMatches() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig.1", [0.12, 0.08, 0.68, 0.31])])
+        try writeImage("figures/p012-fig.1.png")
+        let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig.1}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[\(Self.w68)]{figures/p012-fig.1}")
+    }
+
     func testExtensionlessPathMatchesCroppedPNG() throws {
         try writeSpecExample()
         let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01}")

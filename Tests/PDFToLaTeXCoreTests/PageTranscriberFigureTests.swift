@@ -229,6 +229,34 @@ final class PageTranscriberFigureTests: XCTestCase {
         XCTAssertEqual(result.figureReport.resolutions, [])
     }
 
+    /// bbox 超出頁面：仍裁切與頁面相交的部分（不讓文件因缺圖而無法編譯），但寬度不補
+    /// （`invalidBoundingBox`），並記一筆 note 說明圖可能被截斷。
+    func testOutOfRangeBBoxIsCroppedToThePageButGetsNoWidthAndIsReported() throws {
+        let image = try writePageImage(page: 18, color: Self.red)
+        let result = process(
+            page: 18, latex: "\\includegraphics{figures/fig1.png}",
+            figures: [("fig1", [0.8, 0.1, 0.4, 0.2])], image: image
+        )
+        XCTAssertEqual(figureFiles(), ["p018-fig1.png"])
+        XCTAssertEqual(try inspect("figures/p018-fig1.png").width, 20)
+        XCTAssertEqual(result.latex, "\\includegraphics{figures/p018-fig1.png}")
+        XCTAssertEqual(result.figureReport.resolutions.map(\.outcome), [.invalidBoundingBox([0.8, 0.1, 0.4, 0.2])])
+        XCTAssertEqual(result.notes.count, 1)
+        XCTAssertTrue(result.notes.first?.contains("p018-fig1.png") ?? false, "\(result.notes)")
+    }
+
+    /// id 含 `.`（安全字元）時，省略 `.png` 的引用仍配得上（pdflatex 實測 `figures/p018-fig_2.b`
+    /// 會自動補 `.png` 找到檔）。
+    func testExtensionlessReferenceToADottedIdIsMatched() throws {
+        let image = try writePageImage(page: 18, color: Self.red)
+        let result = process(
+            page: 18, latex: "\\includegraphics{figures/fig_2.b}",
+            figures: [("fig_2.b", [0.1, 0.1, 0.4, 0.2])], image: image
+        )
+        XCTAssertEqual(figureFiles(), ["p018-fig_2.b.png"])
+        XCTAssertEqual(result.latex, "\\includegraphics[\(Self.capped("244.8"))]{figures/p018-fig_2.b.png}")
+    }
+
     // MARK: - #209 width at transcription time
 
     func testExistingSizeOptionsAreKeptButThePathIsStillRewritten() throws {

@@ -147,7 +147,7 @@ extension LaTeXNormalizer {
     /// 1. 本頁的裁切檔 `FigureAssetPath.cropped(page: N, id:)`，例如 `figures/p018-fig1.png`
     ///    （PsychQuant/macdoc#208 起的檔名）；
     /// 2. `figures/<id>.png`（之前的版本的檔名，讓既有專案仍配得上）。
-    /// 原始碼路徑必須與其中之一完全相同，或是省略 `.png` 的同一路徑。不做子字串比對，也不跨頁
+    /// 原始碼路徑必須與其中之一完全相同，或是省略 `.png` 的同一路徑（id 含 `.` 時也算）。不做子字串比對，也不跨頁
     /// 借用同名 figure 的 bbox。同一個 key 有多筆 bbox 時只有全部相同才算唯一。
     ///
     /// ## 既有選項的合併規則
@@ -365,8 +365,11 @@ extension LaTeXNormalizer {
     static func matchFigure(
         path: String, page: Int, metadata: FigureMetadata, croppedFiles: Set<String>?
     ) -> FigureMatch? {
+        // 省略 `.png` 的引用：id 可以含 `.`（`fig_2.b`），所以不以「有沒有副檔名」判斷，凡不是以
+        // `.png` 結尾都另試補上 `.png`（pdflatex 實測 `figures/p018-fig_2.b` 會找到 `….png`）。
+        // 配對仍是 metadata 的完整路徑比對，不會因此配到別的圖。
         var candidates = [path]
-        if (path as NSString).pathExtension.isEmpty {
+        if !path.hasSuffix(".png") {
             candidates.append(path + ".png")
         }
         for candidate in candidates {
