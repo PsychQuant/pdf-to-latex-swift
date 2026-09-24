@@ -253,7 +253,7 @@ extension LaTeXNormalizer {
 
     /// `\chapter` 名稱之後：可選 `*`、可選 `[短標題]`、必要 `{章名}`（其間可有空白、換行、註解）。
     /// 回傳章名閉合大括號之後的 offset；找不到或超出 body 時回傳 nil。
-    private static func chapterCommandEnd(_ scan: LaTeXSourceScan, after offset: Int) -> Int? {
+    static func chapterCommandEnd(_ scan: LaTeXSourceScan, after offset: Int) -> Int? {
         var k = scan.skipIgnorable(from: offset)
         if k < scan.units.count && scan.units[k] == U.star && scan.kinds[k] == .code {
             k = scan.skipIgnorable(from: k + 1)
