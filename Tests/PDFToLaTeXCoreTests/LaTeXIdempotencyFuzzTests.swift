@@ -137,33 +137,58 @@ final class LaTeXIdempotencyFuzzTests: XCTestCase {
 
     // MARK: - Figure widths
 
-    /// 把結果與原文逐字對齊，只允許插入 `[width=…]`、`,width=…`、`width=…`；回傳插入次數，
-    /// 對不上時回傳 -1。
-    private func insertionCount(source: String, result: String) -> Int {
-        let inserts = ["[width=0.5\\textwidth]", ",width=0.5\\textwidth", "width=0.5\\textwidth"].map { Array($0.utf16) }
+    /// 本工具寫入的寬度值（bbox 寬 0.5 × 頁寬 612bp = 306bp；PsychQuant/macdoc#207）。
+    private static let widthValue = "\\ifdim 306bp>\\linewidth\\linewidth\\else 306bp\\fi"
+    /// v0.3.0 對同一張圖寫出的舊值；只有這個精確的值會被升級成 `widthValue`。
+    private static let legacyValue = "0.5\\textwidth"
+
+    /// 把結果與原文逐字對齊，只允許兩種差異：插入 `[width=…]`、`,width=…`、`width=…`，以及把
+    /// v0.3.0 的 `legacyValue` 整段換成 `widthValue`。回傳（插入次數, 替換次數），對不上時回傳 nil。
+    private func edits(source: String, result: String) -> (inserted: Int, replaced: Int)? {
+        let inserts = ["[width=\(Self.widthValue)]", ",width=\(Self.widthValue)", "width=\(Self.widthValue)"]
+            .map { Array($0.utf16) }
+        let legacy = Array(Self.legacyValue.utf16)
+        let replacement = Array(Self.widthValue.utf16)
         let a = Array(source.utf16)
         let b = Array(result.utf16)
+        func starts(_ x: [UInt16], _ at: Int, _ needle: [UInt16]) -> Bool {
+            at + needle.count <= x.count && Array(x[at..<(at + needle.count)]) == needle
+        }
         var i = 0
         var j = 0
-        var count = 0
+        var inserted = 0
+        var replaced = 0
         while j < b.count {
             if i < a.count && a[i] == b[j] {
                 i += 1
                 j += 1
                 continue
             }
-            guard let insert = inserts.first(where: { j + $0.count <= b.count && Array(b[j..<(j + $0.count)]) == $0 }) else {
-                return -1
+            if starts(a, i, legacy) && starts(b, j, replacement) {
+                i += legacy.count
+                j += replacement.count
+                replaced += 1
+                continue
             }
+            guard let insert = inserts.first(where: { starts(b, j, $0) }) else { return nil }
             j += insert.count
-            count += 1
+            inserted += 1
         }
-        return i == a.count ? count : -1
+        return i == a.count ? (inserted, replaced) : nil
     }
 
     private static let optionFragments = [
         "", "[]", "[clip]", "[clip % note\n]", "[angle=90,% width=3cm\n]", "[wid% c\n  th=3cm]",
         "[trim={1, 2, 3, 4}, clip]", "[alt={a]b}]", "[width=2cm]", "[% only\n]", "[scale=5]",
+        // v0.3.0 形狀（值相符 → 升級）與近似形狀（→ 原樣保留）
+        "[width=0.5\\textwidth]", "[clip,width=0.5\\textwidth % n\n]", "[ width=0.5\\textwidth]",
+        "[width=0.4\\textwidth]", "[width=0.5\\textwidth,clip]", "[height=1cm,width=0.5\\textwidth]",
+    ]
+
+    /// 近似 v0.3.0 形狀但不是：出現次數在結果中必須完全不變（獨立於 `edits` 的對齊判準）。
+    private static let nearMissFragments = [
+        "[ width=0.5\\textwidth]", "[width=0.4\\textwidth]", "[width=0.5\\textwidth,clip]",
+        "[height=1cm,width=0.5\\textwidth]",
     ]
 
     func testFigureWidthsAreIdempotentAndOnlyAddAWidthOption() throws {
@@ -185,6 +210,8 @@ final class LaTeXIdempotencyFuzzTests: XCTestCase {
         try Data([0]).write(to: projectDir.appendingPathComponent("figures/fig.png"))
 
         var rng = SeededGenerator(state: 0x5EED_0011)
+        var totalApplied = 0
+        var totalUpgraded = 0
         for index in 0..<2000 {
             var lines: [String] = []
             var page = 1
@@ -210,16 +237,31 @@ final class LaTeXIdempotencyFuzzTests: XCTestCase {
             let context = "case \(index):\n\(source.debugDescription)\n--- first ---\n\(first.result.debugDescription)"
             XCTAssertEqual(second.result, first.result, context)
 
-            // 只多了 width 選項：結果 = 原文 + 每張套用的圖恰好一段插入；verbatim 區塊不變。
+            // 只多了 width 選項或舊版寬度升級：結果 = 原文 + 每張新套用的圖恰好一段插入、
+            // 每張升級的圖恰好一段替換；verbatim 區塊不變。
             let applied = first.resolutions.filter {
-                if case .widthApplied = $0.outcome { return true }
+                if case .widthApplied = $0.outcome { return !$0.replacedLegacyWidth }
                 return false
             }.count
-            XCTAssertEqual(insertionCount(source: source, result: first.result), applied, context)
+            let upgraded = first.resolutions.filter(\.replacedLegacyWidth).count
+            let diff = edits(source: source, result: first.result)
+            XCTAssertEqual(diff?.inserted, applied, context)
+            XCTAssertEqual(diff?.replaced, upgraded, context)
+            for fragment in Self.nearMissFragments {
+                XCTAssertEqual(
+                    first.result.components(separatedBy: fragment).count,
+                    source.components(separatedBy: fragment).count, "\(fragment)\n\(context)"
+                )
+            }
+            totalApplied += applied
+            totalUpgraded += upgraded
             let block = "\\begin{verbatim}\n\\includegraphics{figures/fig.png}\n\\end{verbatim}"
             XCTAssertEqual(
                 first.result.components(separatedBy: block).count, source.components(separatedBy: block).count, context
             )
         }
+        // 兩條路徑（新增、升級）都真的被走過，fuzz 才有辨識力。
+        XCTAssertGreaterThan(totalApplied, 100)
+        XCTAssertGreaterThan(totalUpgraded, 100)
     }
 }
