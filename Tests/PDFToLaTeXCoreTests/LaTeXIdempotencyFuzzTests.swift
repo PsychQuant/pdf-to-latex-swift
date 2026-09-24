@@ -95,14 +95,43 @@ final class LaTeXIdempotencyFuzzTests: XCTestCase {
         }
     }
 
-    func testMarkerStrippingThenCountersIsStable() {
+    /// 移除 markers 之後，pipeline 再跑一次不變。這一條**不**驗證 counter 的歸屬或冪等性：
+    /// markers 一旦移除，第二輪 `insertPageCounters` 已經沒有頁碼依據，counter 插錯位置也會通過
+    /// （Codex R4 MEDIUM）。counter 本身的冪等性由上方的 page-counter fuzz 與定向測試負責。
+    ///
+    /// 另外加兩個不經 `LaTeXSourceScan` 的判準，讓 scanner 誤判也會被抓到：
+    /// - strip 後的各行是 strip 前各行的子序列，且被刪的每一行都是 `%% === Page N ===`；
+    /// - 產生器裡放在 verbatim 內的假 marker 片段原封不動。
+    func testStrippingMarkersAfterCountersIsStableAndOnlyRemovesMarkerLines() {
         var rng = SeededGenerator(state: 0x5EED_0010)
         let normalizer = LaTeXNormalizer(stripPageMarkers: true)
+        let markerLine = try! NSRegularExpression(pattern: #"^%% === Page \d+ ===\r?$"#)
+        let verbatimSnippet = "\\begin{verbatim}\n%% === Page 99 ===\n\\chapter{Fake}\n\\end{verbatim}"
         for index in 0..<2000 {
             let source = makeDocument(&rng)
-            let first = normalizer.removePageMarkers(LaTeXNormalizer.insertPageCounters(source))
+            let counted = LaTeXNormalizer.insertPageCounters(source)
+            let first = normalizer.removePageMarkers(counted)
             let second = normalizer.removePageMarkers(LaTeXNormalizer.insertPageCounters(first))
             XCTAssertEqual(second, first, "case \(index):\n\(source.debugDescription)")
+
+            let kept = first.components(separatedBy: "\n")
+            var cursor = kept.startIndex
+            for line in counted.components(separatedBy: "\n") {
+                if cursor < kept.endIndex, kept[cursor] == line {
+                    cursor += 1
+                    continue
+                }
+                let range = NSRange(line.startIndex..., in: line)
+                XCTAssertNotNil(markerLine.firstMatch(in: line, range: range),
+                                "case \(index): strip 刪掉了非 marker 行 \(line.debugDescription)")
+            }
+            XCTAssertEqual(cursor, kept.endIndex, "case \(index): strip 後出現原本沒有的行")
+
+            let lineEnding = source.contains("\r\n") ? "\r\n" : "\n"
+            let snippet = verbatimSnippet.replacingOccurrences(of: "\n", with: lineEnding)
+            if counted.contains(snippet) {
+                XCTAssertTrue(first.contains(snippet), "case \(index): verbatim 內的假 marker 被刪")
+            }
         }
     }
 
