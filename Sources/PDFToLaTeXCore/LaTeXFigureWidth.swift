@@ -70,11 +70,15 @@ public struct FigureWidthReport: Sendable, Equatable {
     }
 }
 
-/// 裁切圖檔的命名（PsychQuant/macdoc#208）：`figures/p<頁碼>-<id>.png`，頁碼至少三位數。
+/// 裁切圖檔的命名（PsychQuant/macdoc#208）：`figures/p<頁碼>-<小寫 id>.png`，頁碼至少三位數。
 ///
 /// 路徑一定帶頁碼，兩頁用同一個 id（例如都叫 `fig1`）也不會寫到同一個檔。id 已經以**本頁**
 /// 的前綴開頭（提示詞要求的 `pXXX-figYY` 形式）時不重複加；別頁的前綴不算
 /// （第 19 頁的 `p018-fig1` → `figures/p019-p018-fig1.png`）。
+///
+/// id 一律轉成小寫：macOS 預設的 APFS 不分大小寫，`Fig1` 與 `fig1` 是同一個檔。轉成小寫後
+/// 「字串相同」就等於「同一個檔」，撞名判定（`PageTranscriber` 的裁切、寬度的 ambiguous 判定）
+/// 才與檔案系統一致。
 ///
 /// 不同頁的檔名不會相同：前綴是 `p` + 頁碼數字 + `-`，頁碼不同則前綴在 `-` 之前就分岔。
 enum FigureAssetPath {
@@ -85,12 +89,13 @@ enum FigureAssetPath {
     /// id 不是安全的檔名時回傳 nil（不裁切、不改寫 LaTeX）。
     static func cropped(page: Int, id: String) -> String? {
         guard isSafeID(id) else { return nil }
+        let name = id.lowercased()
         let prefix = pagePrefix(page)
-        return "figures/\(id.hasPrefix(prefix) ? id : prefix + id).png"
+        return "figures/\(name.hasPrefix(prefix) ? name : prefix + name).png"
     }
 
     /// 安全的 id（封閉列舉）：非空，且每個字元都是 ASCII 英文字母、數字、`-`、`_`、`.` 之一。
-    /// 其他字元一律不收，包括 `/`（`../p019-fig1` 會穿越到別頁的檔名）、`\\`、`%`、`{`、`}`、
+    /// 其他字元一律不收，包括 `/`（`../p019-fig1` 會穿越到別頁的檔名）、`\`、`%`、`{`、`}`、
     /// 空白（在 `\includegraphics{…}` 裡會改變 TeX 的讀法）與非 ASCII 字元。
     static func isSafeID(_ id: String) -> Bool {
         !id.isEmpty && id.utf8.allSatisfy { byte in
@@ -202,18 +207,20 @@ extension LaTeXNormalizer {
     /// 轉寫當下（`PageTranscriber` 的後處理，PsychQuant/macdoc#209）：一頁 AI 輸出的 LaTeX 片段。
     ///
     /// 與 `applyFigureWidths(_:projectDir:)` 走**同一個**實作（對象、配對、合併規則、舊輸出升級、
-    /// 回報都相同），只有四處不同：
+    /// 回報都相同），只有五處不同：
     /// - 頁碼就是 `page`，不看 page marker；
     /// - metadata 只有這一頁的 `figures` 與 `pageWidth`（nil → `missingPageRecord`）；id 不安全
     ///   （`FigureAssetPath.isSafeID`）的 figure 不登記；
-    /// - 配對到的呼叫，路徑一律改寫成本頁的裁切檔（`figures/p018-fig1.png`；PsychQuant/macdoc#208），
-    ///   不論是否補上寬度；`missingImageFile` 檢查的也是這個裁切檔；
-    /// - bbox 取「對應到同一個裁切檔的所有 figure」：同頁 `fig1` 與 `p018-fig1` 撞名且 bbox 不同時，
-    ///   兩種寫法的呼叫都是 `ambiguousFigure`（裁切檔裡是哪一張無法由路徑判定）。
-    ///
-    /// 呼叫前應先完成裁切，否則每張圖都會回報 `missingImageFile`。
+    /// - 圖檔存在與否只看 `croppedFiles`（這一次實際寫出的裁切檔）：配對到的呼叫若其裁切檔在
+    ///   其中，路徑改寫成它（`figures/p018-fig1.png`；PsychQuant/macdoc#208），不論是否補上寬度；
+    ///   不在其中（裁切失敗、之前執行留下的舊檔）則路徑原樣保留，寬度回報 `missingImageFile`；
+    /// - bbox 取「對應到同一個裁切檔的所有 figure」：同頁 `fig1` 與 `p018-fig1`（或 `Fig1`）撞名且
+    ///   bbox 不同時，各種寫法的呼叫都是 `ambiguousFigure`（裁切檔裡是哪一張無法由路徑判定）；
+    /// - 巨集定義內的呼叫（之後被呼叫時才執行）也改寫路徑，但不補寬度、不回報——寬度只補在
+    ///   作用中的呼叫，與 normalize 相同。註解、verbatim 類環境與 `\verb` 內的一律不動。
     static func applyFigureWidths(
-        toTranscribedPage latex: String, page: Int, figures: [FigureRegion], pageWidth: Double?, projectDir: URL
+        toTranscribedPage latex: String, page: Int, figures: [FigureRegion], pageWidth: Double?,
+        croppedFiles: Set<String>, projectDir: URL
     ) -> FigureWidthReport {
         var keyed: [FigureKey: [FigureEntry]] = [:]
         for figure in figures where FigureAssetPath.isSafeID(figure.id) {
@@ -222,7 +229,9 @@ extension LaTeXNormalizer {
         let metadata = FigureMetadata(
             pageWidths: pageWidth.map { [page: $0] } ?? [:], figures: keyed, unreadableResponseFiles: []
         )
-        return rewriteFigureIncludes(latex, projectDir: projectDir, mode: .transcribedPage(page)) {
+        return rewriteFigureIncludes(
+            latex, projectDir: projectDir, mode: .transcribedPage(page, croppedFiles: croppedFiles)
+        ) {
             .success(metadata)
         }
     }
@@ -239,8 +248,8 @@ extension LaTeXNormalizer {
     enum FigureRewriteMode {
         /// normalize：整份文件，頁碼取前一個 page marker，只補寬度。
         case document
-        /// 轉寫當下：單頁片段，頁碼已知；另把路徑改寫成本頁的裁切檔。
-        case transcribedPage(Int)
+        /// 轉寫當下：單頁片段，頁碼已知；另把路徑改寫成這次寫出的本頁裁切檔。
+        case transcribedPage(Int, croppedFiles: Set<String>)
     }
 
     /// 兩條路徑唯一的實作。`loadMetadata` 只在有呼叫需要查詢時才呼叫（所有呼叫都帶明確尺寸、
@@ -250,7 +259,9 @@ extension LaTeXNormalizer {
         loadMetadata: () -> Result<FigureMetadata, FigureMetadataError>
     ) -> FigureWidthReport {
         let scan = LaTeXSourceScan(source)
-        let calls = findFigureIncludeGraphics(in: scan)
+        var croppedFiles: Set<String>?
+        if case .transcribedPage(_, let files) = mode { croppedFiles = files }
+        let calls = findFigureIncludeGraphics(in: scan, includeDefinitions: croppedFiles != nil)
         guard !calls.isEmpty else {
             return FigureWidthReport(result: source, resolutions: [], unreadableResponseFiles: [])
         }
@@ -261,14 +272,23 @@ extension LaTeXNormalizer {
 
         for call in calls {
             let page: Int?
-            let rewritesPath: Bool
             switch mode {
             case .document:
                 page = scan.pageMarkers.last(where: { $0.offset < call.start })?.page
-                rewritesPath = false
-            case .transcribedPage(let fixed):
+            case .transcribedPage(let fixed, _):
                 page = fixed
-                rewritesPath = true
+            }
+            let rewritesPath = croppedFiles != nil
+
+            guard call.isActive else {
+                // 巨集定義內（只在轉寫當下會找這些）：只跟著裁切檔改名。
+                if let croppedFiles, let page, case .success(let metadata) = loadMetadata(),
+                   let target = matchFigure(path: call.normalizedPath, page: page, metadata: metadata,
+                                            croppedFiles: croppedFiles)?.croppedPath,
+                   scan.text(call.pathRange) != target {
+                    edits.append((call.pathRange, target))
+                }
+                continue
             }
             let needsWidth = !call.hasExplicitSize
             var outcome = FigureWidthResolution.Outcome.explicitSizePreserved
@@ -281,14 +301,15 @@ extension LaTeXNormalizer {
                 case .success(let metadata):
                     loaded = metadata
                     let match = page.flatMap {
-                        matchFigure(path: call.normalizedPath, page: $0, metadata: metadata, byCroppedFile: rewritesPath)
+                        matchFigure(path: call.normalizedPath, page: $0, metadata: metadata, croppedFiles: croppedFiles)
                     }
                     if rewritesPath, let target = match?.croppedPath, scan.text(call.pathRange) != target {
                         edits.append((call.pathRange, target))
                     }
                     if needsWidth || call.legacyWidth != nil {
                         let resolved = resolveFigureWidth(
-                            match: match, page: page, metadata: metadata, projectDir: projectDir
+                            match: match, page: page, metadata: metadata, croppedFiles: croppedFiles,
+                            projectDir: projectDir
                         )
                         if needsWidth {
                             outcome = resolved.outcome
@@ -330,18 +351,20 @@ extension LaTeXNormalizer {
 
     /// 原始碼路徑配對到的 metadata。
     struct FigureMatch {
-        /// 要檢查存在的圖檔：normalize 是配對成功的候選路徑（原始碼路徑，或補上 `.png` 的同一
+        /// 要確認存在的圖檔：normalize 是配對成功的候選路徑（原始碼路徑，或補上 `.png` 的同一
         /// 路徑）；轉寫當下是本頁的裁切檔。
         let path: String
-        /// 這張圖在本頁的裁切檔；id 不安全時為 nil。
+        /// 原始碼要改寫成的裁切檔：只有轉寫當下、且這次確實寫出了這個檔時才有值。
         let croppedPath: String?
         let boxes: [[Double]]
     }
 
-    /// `byCroppedFile`（轉寫當下）：原始碼之後會改指向裁切檔，所以 bbox 取「對應到這個裁切檔的
-    /// 所有 figure」，而不是只取原始碼路徑那個 key。同一頁 `fig1` 與 `p018-fig1` 撞名時，
-    /// 裁切檔只有一個，兩個呼叫都是 `ambiguousFigure`。`path` 則是之後要檢查存在的那個檔。
-    static func matchFigure(path: String, page: Int, metadata: FigureMetadata, byCroppedFile: Bool) -> FigureMatch? {
+    /// `croppedFiles` 非 nil（轉寫當下）時，原始碼之後會改指向裁切檔，所以 bbox 取「對應到這個
+    /// 裁切檔的所有 figure」，而不是只取原始碼路徑那個 key：同一頁 `fig1` 與 `p018-fig1` 撞名時，
+    /// 裁切檔只有一個，兩個呼叫都是 `ambiguousFigure`。
+    static func matchFigure(
+        path: String, page: Int, metadata: FigureMetadata, croppedFiles: Set<String>?
+    ) -> FigureMatch? {
         var candidates = [path]
         if (path as NSString).pathExtension.isEmpty {
             candidates.append(path + ".png")
@@ -350,21 +373,28 @@ extension LaTeXNormalizer {
             guard let entries = metadata.figures[FigureKey(page: page, path: candidate)], !entries.isEmpty else {
                 continue
             }
+            guard let croppedFiles else {
+                return FigureMatch(path: candidate, croppedPath: nil, boxes: entries.map(\.bbox))
+            }
             // 同一個 key 底下的裁切檔必定相同（見 `register`）；保險起見不同時視為沒有裁切檔。
             let croppedPaths = Set(entries.map(\.croppedPath))
-            let cropped = croppedPaths.count == 1 ? croppedPaths.first! : nil
-            if byCroppedFile, let cropped,
-               let fileEntries = metadata.figures[FigureKey(page: page, path: cropped)], !fileEntries.isEmpty {
-                return FigureMatch(path: cropped, croppedPath: cropped, boxes: fileEntries.map(\.bbox))
+            guard croppedPaths.count == 1, let cropped = croppedPaths.first ?? nil,
+                  let fileEntries = metadata.figures[FigureKey(page: page, path: cropped)], !fileEntries.isEmpty else {
+                return FigureMatch(path: candidate, croppedPath: nil, boxes: entries.map(\.bbox))
             }
-            return FigureMatch(path: candidate, croppedPath: cropped, boxes: entries.map(\.bbox))
+            return FigureMatch(
+                path: cropped,
+                croppedPath: croppedFiles.contains(cropped) ? cropped : nil,
+                boxes: fileEntries.map(\.bbox)
+            )
         }
         return nil
     }
 
     /// 回傳結果；`widthApplied` 時另附比例的文字（供舊輸出比對）與要寫入的 `width=` 值。
+    /// `croppedFiles` 非 nil（轉寫當下）時，圖檔存在與否只看它，不看磁碟上是否有同名舊檔。
     private static func resolveFigureWidth(
-        match: FigureMatch?, page: Int?, metadata: FigureMetadata, projectDir: URL
+        match: FigureMatch?, page: Int?, metadata: FigureMetadata, croppedFiles: Set<String>?, projectDir: URL
     ) -> (outcome: FigureWidthResolution.Outcome, fractionText: String?, value: String?) {
         guard let page else { return (.noPageContext, nil, nil) }
         guard let match else { return (.noMatchingFigure, nil, nil) }
@@ -388,7 +418,9 @@ extension LaTeXNormalizer {
               let points = Double(pointsText) else {
             return (.widthNotRepresentable(bbox[2]), nil, nil)
         }
-        guard FileManager.default.fileExists(atPath: projectDir.appendingPathComponent(match.path).path) else {
+        let imageExists = croppedFiles.map { $0.contains(match.path) }
+            ?? FileManager.default.fileExists(atPath: projectDir.appendingPathComponent(match.path).path)
+        guard imageExists else {
             return (.missingImageFile, nil, nil)
         }
 
@@ -545,6 +577,8 @@ extension LaTeXNormalizer {
 
         /// `\` 的 UTF-16 offset。
         let start: Int
+        /// false：位於巨集定義內（只有 `includeDefinitions` 時才會收進來）。
+        let isActive: Bool
         /// 大括號內原樣的路徑。
         let path: String
         /// 大括號內（不含大括號）的範圍。
@@ -644,11 +678,16 @@ extension LaTeXNormalizer {
         return IncludeGraphicsCall.LegacyWidth(valueRange: numberStart..<end, fraction: fraction)
     }
 
-    /// 所有作用中、路徑以 `figures/` 開頭的 `\includegraphics` 呼叫。
-    static func findFigureIncludeGraphics(in scan: LaTeXSourceScan) -> [IncludeGraphicsCall] {
+    /// 所有作用中、路徑以 `figures/` 開頭的 `\includegraphics` 呼叫。`includeDefinitions` 時另外
+    /// 收巨集定義內的（`isActive == false`；仍排除註解、verbatim 類環境、`\verb` 與 body 之外）。
+    static func findFigureIncludeGraphics(
+        in scan: LaTeXSourceScan, includeDefinitions: Bool = false
+    ) -> [IncludeGraphicsCall] {
         let units = scan.units
         var calls: [IncludeGraphicsCall] = []
-        for word in scan.controlWords where word.name == "includegraphics" && scan.isActive(word.start) {
+        for word in scan.controlWords where word.name == "includegraphics" {
+            let isActive = scan.isActive(word.start)
+            guard isActive || (includeDefinitions && scan.isCodeInBody(word.start)) else { continue }
             var nameEnd = word.end
             var k = scan.skipIgnorable(from: word.end)
             if k < units.count && units[k] == U.star && scan.kinds[k] == .code {
@@ -697,6 +736,7 @@ extension LaTeXNormalizer {
 
             calls.append(IncludeGraphicsCall(
                 start: word.start,
+                isActive: isActive,
                 path: scan.text(pathRange),
                 pathRange: pathRange,
                 normalizedPath: normalized,

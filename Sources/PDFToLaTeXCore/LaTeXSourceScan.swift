@@ -138,6 +138,12 @@ struct LaTeXSourceScan {
             && kinds[offset] == .code && !definitionMask[offset] && body.contains(offset)
     }
 
+    /// code 且位於 document body（巨集定義內也算）。轉寫當下改寫圖片路徑用：定義內的路徑在
+    /// 巨集被呼叫時才會用到，檔名改了它也要跟著改。
+    func isCodeInBody(_ offset: Int) -> Bool {
+        offset >= 0 && offset < units.count && kinds[offset] == .code && body.contains(offset)
+    }
+
     func isExecuted(_ offset: Int) -> Bool {
         offset >= 0 && offset < units.count && kinds[offset] == .code && !definitionMask[offset]
     }

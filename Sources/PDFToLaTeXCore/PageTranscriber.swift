@@ -400,9 +400,11 @@ public struct PageTranscriber: Sendable {
     }
 
     /// 一頁 AI 回應的後處理（不呼叫 AI，可單獨測試）：
-    /// 1. 每個 figure 裁切到 `FigureAssetPath.cropped(page:id:)`（帶頁碼，兩頁同 id 不會互相覆蓋）；
-    /// 2. 以 `LaTeXNormalizer.applyFigureWidths(toTranscribedPage:…)` 把 LaTeX 的路徑改寫成裁切檔、
-    ///    補上寬度——與 normalize 同一份規則，normalize 之後只會看到已帶尺寸的呼叫。
+    /// 1. 每個 figure 裁切到 `FigureAssetPath.cropped(page:id:)`（帶頁碼、小寫，兩頁同 id 不會互相
+    ///    覆蓋）；
+    /// 2. 以 `LaTeXNormalizer.applyFigureWidths(toTranscribedPage:…)` 把 LaTeX 的路徑改寫成**這次
+    ///    實際寫出**的裁切檔、補上寬度——與 normalize 同一份規則，normalize 之後只會看到已帶尺寸的
+    ///    呼叫。裁切失敗的圖，引用原樣保留（不改指向不存在的檔）。
     ///
     /// 不裁切（並記入 `notes`）的情況（封閉列舉）：id 不安全（`FigureAssetPath.isSafeID`）；
     /// bbox 不是 4 個數值；同一頁已有另一個 figure 對應到同一個裁切檔（只裁第一個；bbox 不同時
@@ -410,17 +412,21 @@ public struct PageTranscriber: Sendable {
     static func postProcessPage(
         _ pageResult: PageResult, pageImagePath: String?, pageWidth: Double?, projectRoot: URL
     ) -> PagePostProcessResult {
-        let notes = cropFigures(of: pageResult, pageImagePath: pageImagePath, projectRoot: projectRoot)
+        let crops = cropFigures(of: pageResult, pageImagePath: pageImagePath, projectRoot: projectRoot)
         let report = LaTeXNormalizer.applyFigureWidths(
-            toTranscribedPage: pageResult.latex, page: pageResult.page,
-            figures: pageResult.figures, pageWidth: pageWidth, projectDir: projectRoot
+            toTranscribedPage: pageResult.latex, page: pageResult.page, figures: pageResult.figures,
+            pageWidth: pageWidth, croppedFiles: crops.written, projectDir: projectRoot
         )
-        return PagePostProcessResult(latex: report.result, figureReport: report, notes: notes)
+        return PagePostProcessResult(latex: report.result, figureReport: report, notes: crops.notes)
     }
 
-    private static func cropFigures(of pageResult: PageResult, pageImagePath: String?, projectRoot: URL) -> [String] {
+    /// 回傳給人看的訊息，以及這次實際寫出的裁切檔（專案相對路徑）。
+    private static func cropFigures(
+        of pageResult: PageResult, pageImagePath: String?, projectRoot: URL
+    ) -> (notes: [String], written: Set<String>) {
         let page = pageResult.page
         var notes: [String] = []
+        var written: Set<String> = []
         var cropped: [String: [Double]] = [:]
         for figure in pageResult.figures {
             guard let path = FigureAssetPath.cropped(page: page, id: figure.id) else {
@@ -447,11 +453,12 @@ public struct PageTranscriber: Sendable {
                     bbox: figure.bbox, pageImagePath: pageImagePath,
                     to: projectRoot.appendingPathComponent(path)
                 )
+                written.insert(path)
             } catch {
                 notes.append("裁切 \(path) 失敗: \(error.localizedDescription)")
             }
         }
-        return notes
+        return (notes, written)
     }
 
     private static func cropFigure(bbox: [Double], pageImagePath: String, to outputURL: URL) throws {

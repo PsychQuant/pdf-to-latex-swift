@@ -783,7 +783,9 @@ final class LaTeXFigureWidthTests: XCTestCase {
             (18, "p018-fig1", "figures/p018-fig1.png"),
             (19, "p018-fig1", "figures/p019-p018-fig1.png"),   // 別頁的前綴不算
             (18, "p18-fig1", "figures/p018-p18-fig1.png"),
-            (7, "Fig_2.b", "figures/p007-Fig_2.b.png"),
+            (7, "Fig_2.b", "figures/p007-fig_2.b.png"),         // 一律小寫：macOS 預設檔案系統不分大小寫
+            (18, "Fig1", "figures/p018-fig1.png"),
+            (18, "P018-Fig1", "figures/p018-fig1.png"),
             (1234, "fig1", "figures/p1234-fig1.png"),
             (18, "", nil),
             (18, "../p019-fig1", nil),                          // 路徑穿越：會蓋掉別頁的檔
