@@ -6,8 +6,8 @@ import PDFKit
 /// 專案層級清理結果報告。
 ///
 /// `Equatable` 是自動合成的，所以 `figureWidthResolutions`、`unreadableResponseFiles`、
-/// `pageCounterNotes` 這三個欄位（PsychQuant/macdoc#9、#10 新增）也參與比較：拿一份用預設值
-/// 建構的報告去和 `normalizeProject` 的結果比較，只要有頁碼或圖片紀錄就會不相等。
+/// `pageCounterNotes`（PsychQuant/macdoc#9、#10 新增）與 `chapterOpening`（#210 新增）也參與比較：
+/// 拿一份用預設值建構的報告去和 `normalizeProject` 的結果比較，只要有頁碼、圖片或 openany 紀錄就會不相等。
 public struct NormalizeProjectReport: Sendable, Equatable {
     public let mainFileChanged: Bool
     public let preambleFileChanged: Bool
@@ -27,6 +27,8 @@ public struct NormalizeProjectReport: Sendable, Equatable {
     /// 頁碼還原的紀錄（插入、舊版 counter 移動、衝突、找不到章名）。
     /// `line` 以步驟 13 的中間原始碼為準。
     public let pageCounterNotes: [PageCounterNote]
+    /// 章節從偶數頁開始時的 `openany` 處理結果（PsychQuant/macdoc#210）。
+    public let chapterOpening: ChapterOpeningOutcome
 
     public init(
         mainFileChanged: Bool, preambleFileChanged: Bool,
@@ -36,7 +38,8 @@ public struct NormalizeProjectReport: Sendable, Equatable {
         fontSizeFixed: Bool = false, marginsFixed: Bool = false,
         figureWidthResolutions: [FigureWidthResolution] = [],
         unreadableResponseFiles: [String] = [],
-        pageCounterNotes: [PageCounterNote] = []
+        pageCounterNotes: [PageCounterNote] = [],
+        chapterOpening: ChapterOpeningOutcome = .notNeeded
     ) {
         self.mainFileChanged = mainFileChanged
         self.preambleFileChanged = preambleFileChanged
@@ -51,6 +54,7 @@ public struct NormalizeProjectReport: Sendable, Equatable {
         self.figureWidthResolutions = figureWidthResolutions
         self.unreadableResponseFiles = unreadableResponseFiles
         self.pageCounterNotes = pageCounterNotes
+        self.chapterOpening = chapterOpening
     }
 }
 
@@ -465,6 +469,22 @@ public struct LaTeXNormalizer: Sendable {
         let pageCounters = Self.applyPageCounters(mainSource)
         mainSource = pageCounters.result
 
+        // 13.5 有章節頁的頁碼是偶數時改用 openany（PsychQuant/macdoc#210）：book 預設的 openright
+        //      會在它前面補一張同頁碼的空白頁。依章名之後的 counter 判斷（marker 已移除時也認得），
+        //      所以要在步驟 13 之後；改的是 \documentclass 所在的檔案（外部 preamble 或主檔）。
+        var chapterOpening = ChapterOpeningOutcome.notNeeded
+        if Self.chapterPageCounterValues(mainSource).contains(where: { $0.isMultiple(of: 2) }) {
+            if let preamble = preambleSource {
+                let opened = Self.ensureOpenAny(preamble)
+                preambleSource = opened.result
+                chapterOpening = opened.outcome
+            } else {
+                let opened = Self.ensureOpenAny(mainSource)
+                mainSource = opened.result
+                chapterOpening = opened.outcome
+            }
+        }
+
         // 14. 依 FigureRegion.bbox 還原圖片寬度（需要 manifest + responses + page marker；
         //     必須在步驟 15 移除標記之前）。未改寫者連同原因記入報告，不套任何 fallback 比例。
         let projectDir = mainTexURL.deletingLastPathComponent()
@@ -502,7 +522,8 @@ public struct LaTeXNormalizer: Sendable {
             marginsFixed: marginsFixed,
             figureWidthResolutions: figureWidths.resolutions,
             unreadableResponseFiles: figureWidths.unreadableResponseFiles,
-            pageCounterNotes: pageCounters.notes
+            pageCounterNotes: pageCounters.notes,
+            chapterOpening: chapterOpening
         )
     }
 
