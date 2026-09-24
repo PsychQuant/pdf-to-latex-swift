@@ -11,7 +11,7 @@ struct PDFToLatexCLI: AsyncParsableCommand {
         這個 CLI 先處理可重現的本地步驟：建立專案、掃描 PDF 頁面、維護 manifest，
         後續再往 block segmentation、AI 轉寫、像素驗證與 lossless 組裝擴充。
         """,
-        version: "0.4.0",
+        version: "0.5.0",
         subcommands: [
             InitProjectCommand.self,
             SegmentCommand.self,
