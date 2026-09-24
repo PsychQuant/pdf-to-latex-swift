@@ -194,7 +194,7 @@ final class LaTeXPageCounterTests: XCTestCase {
         XCTAssertEqual(first, second)
     }
 
-    func testExistingAuthoredCounterIsRespected() {
+    func testExistingCounterAfterChapterIsRespected() {
         let after = """
         \\begin{document}
         %% === Page 18 ===
@@ -203,18 +203,377 @@ final class LaTeXPageCounterTests: XCTestCase {
         Text.
         \\end{document}
         """
-        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(after), after)
+        let report = LaTeXNormalizer.applyPageCounters(after)
+        XCTAssertEqual(report.result, after)
+        XCTAssertEqual(report.notes, [])
+    }
 
-        let before = """
+    /// 舊版實作把 counter 放在 `\chapter` 之前（會被記到前一頁）。值與 marker 相同時視為
+    /// 舊版產物：移到 `\chapter{...}` 之後。
+    func testLegacyCounterBeforeChapterWithSameValueIsMovedAfterChapter() {
+        let input = """
         \\begin{document}
+        %% === Page 17 ===
+        Previous text.
         %% === Page 18 ===
         \\setcounter{page}{18}
+        \\chapter{Two}
+        Chapter text.
+        \\end{document}
+        """
+        let expected = """
+        \\begin{document}
+        %% === Page 17 ===
+        \\setcounter{page}{17}
+        Previous text.
+        %% === Page 18 ===
+        \\chapter{Two}
+        \\setcounter{page}{18}
+        Chapter text.
+        \\end{document}
+        """
+        let report = LaTeXNormalizer.applyPageCounters(input)
+        XCTAssertEqual(report.result, expected)
+        XCTAssertTrue(report.notes.contains(PageCounterNote(line: 6, kind: .legacyCounterMoved(page: 18))))
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(report.result), report.result)
+    }
+
+    /// 值與 marker 不同的前置 counter：原樣保留並回報衝突，不插入。
+    func testConflictingCounterBeforeChapterIsLeftAndReported() {
+        let input = """
+        \\begin{document}
+        %% === Page 17 ===
+        Previous text.
+        %% === Page 18 ===
+        \\setcounter{page}{5}
+        \\chapter{Two}
+        Chapter text.
+        \\end{document}
+        """
+        let report = LaTeXNormalizer.applyPageCounters(input)
+        XCTAssertTrue(report.result.contains("\\setcounter{page}{5}\n\\chapter{Two}\nChapter text."))
+        XCTAssertFalse(report.result.contains("{18}"))
+        XCTAssertTrue(report.notes.contains(
+            PageCounterNote(line: 6, kind: .conflictingCounterBeforeChapter(existing: 5, expected: 18))
+        ))
+    }
+
+    /// 緊接在上一章之後的 counter 屬於上一章，不是下一章的舊版前置 counter。
+    func testCounterAfterPreviousChapterIsNotTreatedAsLegacy() {
+        let input = """
+        \\begin{document}
+        %% === Page 7 ===
+        \\chapter{A}
+        \\setcounter{page}{7}
+        \\chapter{B}
+        Text.
+        \\end{document}
+        """
+        let expected = """
+        \\begin{document}
+        %% === Page 7 ===
+        \\chapter{A}
+        \\setcounter{page}{7}
+        \\chapter{B}
+        \\setcounter{page}{7}
+        Text.
+        \\end{document}
+        """
+        let result = LaTeXNormalizer.insertPageCounters(input)
+        XCTAssertEqual(result, expected)
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(result), result)
+    }
+
+    func testCRLFLineEndingsAreHandledLikeLF() {
+        let input = [
+            "\\begin{document}",
+            "%% === Page 1 ===",
+            "",
+            "\\chapter{One}",
+            "Text.",
+            "%% === Page 18 ===",
+            "",
+            "\\setcounter{page}{18}",
+            "\\chapter{Two}",
+            "Chapter text.",
+            "\\end{document}",
+        ].joined(separator: "\r\n")
+        let report = LaTeXNormalizer.applyPageCounters(input)
+        // 空行（只有 \r）不算內容：第一個 marker 讓給緊接的 \chapter{One}，不產生多餘 counter。
+        XCTAssertEqual(report.notes.map(\.kind), [.counterInserted(page: 1), .legacyCounterMoved(page: 18)])
+        XCTAssertEqual(report.notes.first?.line, 4)
+        XCTAssertEqual(LaTeXNormalizer.applyPageCounters(report.result).notes, [])
+    }
+
+    func testUnterminatedVerbatimHidesEverythingAfterIt() {
+        let input = """
+        \\begin{document}
+        %% === Page 2 ===
+        Text.
+        \\begin{verbatim}
+        %% === Page 9 ===
+        \\chapter{Inside}
+        \\end{document}
+        """
+        let result = LaTeXNormalizer.insertPageCounters(input)
+        XCTAssertEqual(result, input.replacingOccurrences(
+            of: "%% === Page 2 ===\n", with: "%% === Page 2 ===\n\\setcounter{page}{2}\n"
+        ))
+    }
+
+    func testReportListsInsertedCounters() {
+        let input = """
+        \\begin{document}
+        %% === Page 1 ===
+        Title page.
+        %% === Page 18 ===
         \\chapter{Two}
         Text.
         \\end{document}
         """
-        let result = LaTeXNormalizer.insertPageCounters(before)
+        let report = LaTeXNormalizer.applyPageCounters(input)
+        XCTAssertEqual(report.notes, [
+            PageCounterNote(line: 2, kind: .counterInserted(page: 1)),
+            PageCounterNote(line: 5, kind: .counterInserted(page: 18)),
+        ])
+        XCTAssertEqual(LaTeXNormalizer.applyPageCounters(report.result).notes, [])
+    }
+
+    // MARK: - Consecutive anchors & document boundaries
+
+    func testConsecutiveChapters() {
+        let input = """
+        \\begin{document}
+        %% === Page 30 ===
+        \\chapter{A}
+        \\chapter{B}
+        Text.
+        \\end{document}
+        """
+        let expected = """
+        \\begin{document}
+        %% === Page 30 ===
+        \\chapter{A}
+        \\setcounter{page}{30}
+        \\chapter{B}
+        \\setcounter{page}{30}
+        Text.
+        \\end{document}
+        """
+        let result = LaTeXNormalizer.insertPageCounters(input)
+        XCTAssertEqual(result, expected)
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(result), result)
+    }
+
+    func testConsecutiveSwitches() {
+        let frontThenMain = """
+        \\begin{document}
+        %% === Page 1 ===
+        \\frontmatter
+        \\mainmatter
+        Main text.
+        \\end{document}
+        """
+        let first = LaTeXNormalizer.insertPageCounters(frontThenMain)
+        XCTAssertEqual(first, frontThenMain.replacingOccurrences(
+            of: "\\mainmatter\n", with: "\\mainmatter\n\\setcounter{page}{1}\n"
+        ))
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(first), first)
+
+        let mainThenArabic = """
+        \\begin{document}
+        %% === Page 8 ===
+        \\mainmatter
+        \\pagenumbering{arabic}
+        Text.
+        \\end{document}
+        """
+        let second = LaTeXNormalizer.insertPageCounters(mainThenArabic)
+        XCTAssertEqual(second, mainThenArabic.replacingOccurrences(
+            of: "\\pagenumbering{arabic}\n", with: "\\pagenumbering{arabic}\n\\setcounter{page}{8}\n"
+        ))
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(second), second)
+    }
+
+    func testMarkersAfterEndDocumentAreIgnored() {
+        let onlyAfter = """
+        \\begin{document}
+        Text.
+        \\end{document}
+        %% === Page 7 ===
+        \\chapter{After}
+        """
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(onlyAfter), onlyAfter)
+
+        let mixed = """
+        \\begin{document}
+        %% === Page 3 ===
+        Text.
+        \\end{document}
+        %% === Page 7 ===
+        \\chapter{After}
+        """
+        let result = LaTeXNormalizer.insertPageCounters(mixed)
         XCTAssertEqual(result.components(separatedBy: "\\setcounter{page}").count - 1, 1)
+        XCTAssertTrue(result.contains("%% === Page 3 ===\n\\setcounter{page}{3}\n"))
+        XCTAssertTrue(result.hasSuffix("%% === Page 7 ===\n\\chapter{After}"))
+    }
+
+    // MARK: - Multi-line chapter commands
+
+    func testChapterTitleOnFollowingLine() {
+        let input = """
+        \\begin{document}
+        %% === Page 20 ===
+        \\chapter
+        {Title On The Next Line}
+        Body.
+        %% === Page 21 ===
+        \\chapter[Short]%
+        % a comment line between the parts
+        {Long Title}
+        More.
+        \\end{document}
+        """
+        let result = LaTeXNormalizer.insertPageCounters(input)
+        XCTAssertTrue(result.contains("{Title On The Next Line}\n\\setcounter{page}{20}\nBody."))
+        XCTAssertTrue(result.contains("{Long Title}\n\\setcounter{page}{21}\nMore."))
+        XCTAssertFalse(result.contains("\\chapter\n\\setcounter"))
+    }
+
+    func testVeryLongChapterTitleHasNoLineCap() {
+        let titleLines = (1...25).map { "word\($0)" }.joined(separator: "\n")
+        let input = "\\begin{document}\n%% === Page 50 ===\n\\chapter{\(titleLines)}\nBody.\n\\end{document}"
+        let result = LaTeXNormalizer.insertPageCounters(input)
+        XCTAssertTrue(result.contains("word25}\n\\setcounter{page}{50}\nBody."))
+    }
+
+    /// 找不到章名閉合大括號：整份原始碼不動，並回報。
+    func testUnterminatedChapterTitleLeavesSourceUnchangedAndIsReported() {
+        let input = """
+        \\begin{document}
+        %% === Page 1 ===
+        Text.
+        %% === Page 2 ===
+        \\chapter{Broken
+        Body.
+        \\end{document}
+        """
+        let report = LaTeXNormalizer.applyPageCounters(input)
+        XCTAssertEqual(report.result, input)
+        XCTAssertEqual(report.notes, [PageCounterNote(line: 5, kind: .chapterTitleNotFound)])
+    }
+
+    // MARK: - Inactive regions (verbatim / \verb / comments / definitions)
+
+    private static let verbatimEnvironments: [(begin: String, end: String)] = [
+        ("\\begin{verbatim}", "\\end{verbatim}"),
+        ("\\begin{verbatim*}", "\\end{verbatim*}"),
+        ("\\begin{Verbatim}", "\\end{Verbatim}"),
+        ("\\begin{lstlisting}[language=TeX]", "\\end{lstlisting}"),
+        ("\\begin{minted}{latex}", "\\end{minted}"),
+        ("\\begin{comment}", "\\end{comment}"),
+    ]
+
+    func testVerbatimLikeRegionsAreInvisible() {
+        for env in Self.verbatimEnvironments {
+            let block = """
+            \(env.begin)
+            %% === Page 99 ===
+            \\chapter{Fake}
+            \\frontmatter
+            \\includegraphics{figures/p099-fig01.png}
+            \(env.end)
+            """
+            let input = """
+            \\begin{document}
+            \(block)
+            %% === Page 12 ===
+            Intro text.
+            \(block)
+            \\chapter{Real}
+            Body.
+            %% === Page 15 ===
+            \\chapter{Next}
+            More.
+            \\end{document}
+            """
+            let result = LaTeXNormalizer.insertPageCounters(input)
+            XCTAssertEqual(result.components(separatedBy: block).count - 1, 2, env.begin)
+            XCTAssertTrue(result.contains("%% === Page 12 ===\n\\setcounter{page}{12}\nIntro text."), env.begin)
+            XCTAssertTrue(result.contains("\\chapter{Real}\n\\setcounter{page}{12}\n"), env.begin)
+            XCTAssertTrue(result.contains("\\chapter{Next}\n\\setcounter{page}{15}\n"), env.begin)
+            XCTAssertFalse(result.contains("{99}"), env.begin)
+            XCTAssertEqual(result.components(separatedBy: "\\setcounter{page}").count - 1, 3, env.begin)
+        }
+    }
+
+    func testInlineVerbIsInvisibleAndPercentInsideVerbIsNotAComment() {
+        let fakeSwitch = """
+        \\begin{document}
+        %% === Page 3 ===
+        \\frontmatter
+        \\verb|\\mainmatter| and \\verb*+\\pagenumbering{arabic}+
+        Preface.
+        %% === Page 6 ===
+        \\chapter*{Foreword}
+        \\end{document}
+        """
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(fakeSwitch), fakeSwitch)
+
+        let realSwitchAfterVerb = """
+        \\begin{document}
+        %% === Page 3 ===
+        \\frontmatter
+        Preface.
+        %% === Page 5 ===
+        \\verb|%| \\mainmatter
+        Main text.
+        \\end{document}
+        """
+        let result = LaTeXNormalizer.insertPageCounters(realSwitchAfterVerb)
+        XCTAssertTrue(result.contains("\\verb|%| \\mainmatter\n\\setcounter{page}{5}\nMain text."))
+    }
+
+    func testSwitchesInsideMacroDefinitionsAreNotExecuted() {
+        let definitions = [
+            "\\newcommand{\\prefaceMode}{\\frontmatter}",
+            "\\renewcommand*{\\a}[1][x]{\\frontmatter}",
+            "\\providecommand\\b{\\pagenumbering{roman}}",
+            "\\def\\c{\\frontmatter}",
+            "\\gdef\\d#1{\\frontmatter}",
+            "\\edef\\e{\\noexpand\\frontmatter}",
+            "\\let\\f\\frontmatter",
+            "\\NewDocumentCommand{\\g}{m}{\\frontmatter}",
+            "\\RenewDocumentCommand\\h{}{\\pagenumbering{Roman}}",
+        ]
+        for definition in definitions {
+            let input = """
+            \\documentclass{book}
+            \(definition)
+            \\begin{document}
+            \(definition)
+            %% === Page 4 ===
+            \\chapter{One}
+            Text.
+            \\end{document}
+            """
+            let result = LaTeXNormalizer.insertPageCounters(input)
+            XCTAssertTrue(result.contains("\\chapter{One}\n\\setcounter{page}{4}\n"), definition)
+        }
+    }
+
+    func testEscapedLineBreakBeforeSwitchNameIsNotASwitch() {
+        let input = """
+        \\begin{document}
+        %% === Page 2 ===
+        \\frontmatter
+        Preface\\\\mainmatter text.
+        %% === Page 4 ===
+        \\chapter*{Foreword}
+        \\end{document}
+        """
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(input), input)
     }
 
     func testNoMarkers_unchanged() {
@@ -412,6 +771,46 @@ final class LaTeXPageCounterTests: XCTestCase {
 
         let report2 = try normalizer.normalizeProject(mainTexURL: mainURL)
         XCTAssertFalse(report2.mainFileChanged)
+        XCTAssertEqual(try String(contentsOf: mainURL, encoding: .utf8), first)
+    }
+
+    func testNormalizeProject_reportsNotesMigratesLegacyAndKeepsVerbatimMarkers() throws {
+        let (dir, mainURL) = try makeProject(main: """
+        \\documentclass{book}
+        \\begin{document}
+
+        %% === Page 1 ===
+        Title page of the book.
+        \\begin{verbatim}
+        %% === Page 99 ===
+        \\chapter{Fake}
+        \\end{verbatim}
+
+        %% === Page 18 ===
+        \\setcounter{page}{18}
+        \\chapter{Linear Regression}
+        Regression starts here.
+
+        \\end{document}
+        """)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let normalizer = LaTeXNormalizer(stripPageMarkers: true)
+        let report1 = try normalizer.normalizeProject(mainTexURL: mainURL)
+        let first = try String(contentsOf: mainURL, encoding: .utf8)
+        XCTAssertEqual(report1.pageCounterNotes.map(\.kind), [
+            .counterInserted(page: 1),
+            .legacyCounterMoved(page: 18),
+        ])
+        XCTAssertTrue(first.contains("\\begin{verbatim}\n%% === Page 99 ===\n\\chapter{Fake}\n\\end{verbatim}"))
+        XCTAssertFalse(first.contains("%% === Page 1 ==="))
+        XCTAssertFalse(first.contains("%% === Page 18 ==="))
+        XCTAssertTrue(first.contains("\\chapter{Linear Regression}\n\\setcounter{page}{18}\nRegression"))
+        XCTAssertEqual(first.components(separatedBy: "\\setcounter{page}{18}").count - 1, 1)
+
+        let report2 = try normalizer.normalizeProject(mainTexURL: mainURL)
+        XCTAssertFalse(report2.mainFileChanged)
+        XCTAssertEqual(report2.pageCounterNotes, [])
         XCTAssertEqual(try String(contentsOf: mainURL, encoding: .utf8), first)
     }
 }

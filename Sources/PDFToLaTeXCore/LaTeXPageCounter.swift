@@ -2,7 +2,42 @@ import Foundation
 
 // MARK: - Page Counter Insertion (PsychQuant/macdoc#9)
 
-/// 頁碼樣式區段。只由來源中明確寫出的指令決定（見 `insertPageCounters` 的 Roman 契約）。
+/// 頁碼還原過程中的一筆紀錄。
+public struct PageCounterNote: Sendable, Equatable {
+    /// 紀錄類別（封閉列舉）。
+    public enum Kind: Sendable, Equatable {
+        /// 在錨點之後插入了 `\setcounter{page}{page}`。
+        case counterInserted(page: Int)
+        /// `\chapter` 前一行、值與 marker 相同的 counter（舊版的放法）已移到章名之後。
+        case legacyCounterMoved(page: Int)
+        /// `\chapter` 前一行的 counter 值與 marker 推得的不同：原樣保留，該章不插入。
+        case conflictingCounterBeforeChapter(existing: Int, expected: Int)
+        /// 找不到 `\chapter` 章名的閉合大括號：整份原始碼不動。
+        case chapterTitleNotFound
+    }
+
+    /// 錨點在輸入原始碼中的行號（1 起算）：marker 行、切換指令所在行、`\chapter` 起始行。
+    public let line: Int
+    public let kind: Kind
+
+    public init(line: Int, kind: Kind) {
+        self.line = line
+        self.kind = kind
+    }
+}
+
+/// `applyPageCounters` 的結果。
+public struct PageCounterReport: Sendable, Equatable {
+    public let result: String
+    public let notes: [PageCounterNote]
+
+    public init(result: String, notes: [PageCounterNote]) {
+        self.result = result
+        self.notes = notes
+    }
+}
+
+/// 頁碼樣式區段。只由來源中明確寫出、且在該處被執行的指令決定。
 enum PageNumberingStyle: Equatable {
     case arabic
     case roman
@@ -14,267 +49,274 @@ extension LaTeXNormalizer {
 
     /// 依 `%% === Page N ===` 標記還原原書頁碼：在「錨點」之後插入 `\setcounter{page}{N}`。
     ///
+    /// 只看「作用中」的原始碼（`LaTeXSourceScan`）：註解、verbatim 類環境、`\verb`、巨集定義
+    /// 內容、`\begin{document}` 之前與 `\end{document}` 之後都不參與；verbatim 內長得像
+    /// marker 的文字不是 marker，裡面的 `\chapter` 也不是章節。
+    ///
     /// ## N 的來源
     ///
-    /// N 取自錨點之前（第一個 marker 則是它自己）最近的一個 body 內 page marker。marker 是
-    /// 轉寫流程寫入的頁序（`PageResult.page`），本函式把它當成要顯示的頁碼。
-    /// `\begin{document}` 之前與 `\end{document}` 之後的內容不參與。
+    /// N 取自錨點之前（第一個 marker 則是它自己）最近的 page marker。marker 是轉寫流程寫入的
+    /// 頁序（`PageResult.page`），本函式把它當成要顯示的頁碼。
     ///
     /// ## 錨點（封閉列舉，只有這三類）
     ///
-    /// 1. **第一個 page marker**：body 內第一個 marker 行。counter 插在 marker 行之後。
-    /// 2. **章節邊界**：去掉行首空白後以 `\chapter{`、`\chapter*{`、`\chapter[` 開頭的行
-    ///    （`\chapterauthor` 之類不算，註解掉的不算）。counter 插在 `\chapter` 指令
-    ///    **閉合大括號所在行之後**，標題跨行也一樣。理由：`\chapter` 會先
-    ///    `\clearpage`／`\cleardoublepage`，counter 若放在它之前，會被記在前一頁、章首頁變成
-    ///    N+1（以 pdflatex 實測：放前面 → 目錄記 19；放後面 → 目錄記 18）。
-    /// 3. **切回阿拉伯數字**：`\mainmatter` 或 `\pagenumbering{arabic}`。兩者都會把 counter
-    ///    重設為 1，所以 counter 插在該行之後。
+    /// 1. **第一個 page marker**：counter 插在 marker 行之後。
+    /// 2. **章節邊界**：一行的第一個非空白 token 是 `\chapter` 控制字（`\chapterauthor` 不算）。
+    ///    counter 插在章名閉合大括號所在行之後；`*`、`[短標題]`、`{章名}` 之間可以有空白、換行與
+    ///    註解，章名長度不設上限。理由：`\chapter` 會先 `\clearpage`／`\cleardoublepage`，
+    ///    counter 放在它之前會被記到前一頁，章首頁變成 N+1（pdflatex 實測：前 → 19、後 → 18）。
+    /// 3. **切回阿拉伯數字**：`\mainmatter` 或 `\pagenumbering{arabic}`。兩者把 counter 重設為 1，
+    ///    counter 插在該行之後；同一行有多個切換指令時以最後一個為準。
     ///
-    /// 錨點 1 與 3 若下一個有內容的行（略過空行與 `%` 註解行，含 page marker）本身是章節或
-    /// 頁碼切換指令，就省略，交給後者處理，避免冗餘的 counter。沒有前置 marker 的錨點一律不動。
+    /// 錨點 1 與 3 若下一個有內容的行（略過空行與只有註解的行）是章節或切換指令，就省略，
+    /// 交給後者處理。沒有前置 marker 的錨點不動。
+    ///
+    /// ## 章節錨點的既有 counter
+    ///
+    /// - 章名之後那一行已是 `\setcounter{page}{…}`：視為已處理，不動。
+    /// - `\chapter` 前一行是 `\setcounter{page}{M}`（且那一行不是上一章的章後 counter）：
+    ///   M 等於 N → 這是舊版的放法，把那一行原樣移到章名之後（`legacyCounterMoved`）；
+    ///   M 不等於 N → 原樣保留、該章不插入，回報 `conflictingCounterBeforeChapter`。
+    ///
+    /// ## 找不到章名
+    ///
+    /// `\chapter` 之後找不到 `{`、或 `{` 在 `\end{document}` 之前沒有閉合時，整份原始碼不動，
+    /// 回報 `chapterTitleNotFound`：大括號結構已經壞了，任何結構性插入都不可靠。
     ///
     /// ## Roman numerals：保守契約
     ///
-    /// 頁碼樣式只由來源中**明確寫出**的指令決定。以下是封閉列舉，不得依性質相似類推其他訊號：
+    /// 頁碼樣式只由**被執行的**切換指令決定。以下是封閉列舉，不得依性質相似類推其他訊號：
     ///
     /// - `\frontmatter`、`\pagenumbering{roman}`、`\pagenumbering{Roman}` → roman 區段
     /// - `\mainmatter`、`\pagenumbering{arabic}` → arabic 區段
     /// - 其他 `\pagenumbering{…}`（如 `alph`）→ 不受管理的區段
     /// - 出現任何上述指令之前 → arabic（LaTeX 預設）
     ///
-    /// 特別是：頁碼數字小、位在第一個 `\chapter` 之前、`\chapter*{Preface}`、
-    /// `\tableofcontents`，**都不是** front-matter 證據，不會觸發 roman。
+    /// 「被執行」= 真正的控制字邊界（`\\mainmatter` 是換行加文字，不算），且不在巨集定義內
+    /// （`\newcommand{\prefaceMode}{\frontmatter}` 不會切換；之後呼叫 `\prefaceMode` 也不展開追蹤）。
+    /// 頁碼數字小、位在第一個 `\chapter` 之前、`\chapter*{Preface}`、`\tableofcontents`
+    /// **都不是** front-matter 證據，不會觸發 roman。
     ///
-    /// roman 與不受管理的區段內不插入任何 counter：marker 是實體頁序，不是該區段的頁標籤，
-    /// 寫進去等於捏造頁碼。本函式也不輸出 `\pagenumbering{roman}`／`{arabic}`：目前承認的
-    /// front-matter 證據就是上列指令本身，它們已經完成樣式切換；本函式的責任是在切回
-    /// arabic 之後，把被重設為 1 的 counter 還原成原書頁碼。PDF page labels 之類的外部
-    /// 頁標籤來源尚未納入此契約。
+    /// roman 與不受管理的區段內不插入任何 counter：marker 是實體頁序，不是該區段的頁標籤。
+    /// 本函式不輸出 `\pagenumbering`：承認的證據就是上列指令本身，它們已完成切換；本函式只在
+    /// 切回 arabic 後把被重設為 1 的 counter 還原成原書頁碼。PDF page labels 尚未納入此契約。
     ///
     /// ## 冪等
     ///
-    /// 錨點之後那一行若已是 `\setcounter{page}{…}`（不論數值），視為已處理或使用者自訂，
-    /// 不再插入；章節錨點之前那一行若是 `\setcounter{page}{…}`，同樣尊重、不重複插入。
-    /// 因此重跑不會改變輸出。
-    public static func insertPageCounters(_ source: String) -> String {
-        let lines = source.components(separatedBy: "\n")
-        let body = documentBodyRange(of: lines)
-        let markers = pageMarkers(in: lines, within: body)
-        guard let firstMarker = markers.first else { return source }
-
-        func nearestMarkerPage(atOrBefore line: Int) -> Int? {
-            markers.last(where: { $0.line <= line })?.page
+    /// 已處理過的錨點後面都有 counter，重跑不再插入；舊版 counter 移過之後不再位於章前。
+    public static func applyPageCounters(_ source: String) -> PageCounterReport {
+        let scan = LaTeXSourceScan(source)
+        guard let firstMarker = scan.pageMarkers.first else {
+            return PageCounterReport(result: source, notes: [])
         }
 
-        var style: PageNumberingStyle = .arabic
-        var insertions: [(afterLine: Int, page: Int)] = []
-        var i = 0
-
-        while i < lines.count {
-            let code = codePortion(of: lines[i])
-            let inBody = body.contains(i)
-
-            if let switched = numberingSwitch(in: code) {
-                style = switched
-                if inBody, switched == .arabic,
-                   !nextContentLineTakesOver(lines, after: i, within: body),
-                   !hasPageCounter(lines, at: i + 1),
-                   let page = nearestMarkerPage(atOrBefore: i - 1) {
-                    insertions.append((i, page))
-                }
-                i += 1
-                continue
+        var chapters: [ChapterCommand] = []
+        for word in scan.controlWords where word.name == "chapter" && scan.isActive(word.start) {
+            let line = scan.line(of: word.start)
+            guard scan.firstNonBlank(line: line) == word.start else { continue }
+            guard let end = chapterCommandEnd(scan, after: word.end) else {
+                return PageCounterReport(
+                    result: source, notes: [PageCounterNote(line: line + 1, kind: .chapterTitleNotFound)]
+                )
             }
+            chapters.append(ChapterCommand(offset: word.start, startLine: line, endLine: scan.line(of: end - 1)))
+        }
 
-            guard inBody else {
-                i += 1
-                continue
-            }
+        let switches = scan.controlWords.compactMap { word -> NumberingSwitch? in
+            guard scan.isExecuted(word.start), let style = numberingStyle(of: word, in: scan) else { return nil }
+            return NumberingSwitch(offset: word.start, line: scan.line(of: word.start), style: style)
+        }
+        let lastSwitchOnLine = Dictionary(switches.map { ($0.line, $0.offset) }, uniquingKeysWith: max)
 
-            if i == firstMarker.line {
-                if style == .arabic,
-                   !nextContentLineTakesOver(lines, after: i, within: body),
-                   !hasPageCounter(lines, at: i + 1) {
-                    insertions.append((i, firstMarker.page))
-                }
-                i += 1
-                continue
-            }
+        var events: [PageCounterEvent] = [.firstMarker(firstMarker)]
+        events += switches.map { .numberingSwitch($0) }
+        events += chapters.map { .chapter($0) }
+        events.sort { $0.offset < $1.offset }
 
-            if isChapterStart(code) {
-                guard let end = chapterCommandEndLine(lines, start: i, limit: body.upperBound) else {
-                    i += 1
+        let lines = source.components(separatedBy: "\n")
+        let context = AnchorContext(
+            scan: scan,
+            chapterStartLines: Set(chapters.map(\.startLine)),
+            chapterEndLines: Set(chapters.map(\.endLine)),
+            switchLines: Set(switches.map(\.line))
+        )
+
+        var style = PageNumberingStyle.arabic
+        var insertAfter: [Int: [String]] = [:]
+        var removed = Set<Int>()
+        var notes: [PageCounterNote] = []
+
+        func insertCounter(page: Int, afterLine line: Int, anchorLine: Int) {
+            insertAfter[line, default: []].append("\\setcounter{page}{\(page)}")
+            notes.append(PageCounterNote(line: anchorLine + 1, kind: .counterInserted(page: page)))
+        }
+
+        for event in events {
+            switch event {
+            case .numberingSwitch(let change):
+                style = change.style
+                guard change.style == .arabic, lastSwitchOnLine[change.line] == change.offset,
+                      scan.body.contains(change.offset),
+                      !context.nextContentLineTakesOver(after: change.line),
+                      !context.hasPageCounter(line: change.line + 1),
+                      let page = context.nearestPage(before: change.offset) else { continue }
+                insertCounter(page: page, afterLine: change.line, anchorLine: change.line)
+
+            case .firstMarker(let marker):
+                guard style == .arabic,
+                      !context.nextContentLineTakesOver(after: marker.line),
+                      !context.hasPageCounter(line: marker.line + 1) else { continue }
+                insertCounter(page: marker.page, afterLine: marker.line, anchorLine: marker.line)
+
+            case .chapter(let chapter):
+                guard style == .arabic,
+                      let page = context.nearestPage(before: chapter.offset),
+                      !context.hasPageCounter(line: chapter.endLine + 1) else { continue }
+                let previous = chapter.startLine - 1
+                if !context.chapterEndLines.contains(previous - 1),
+                   let existing = context.pageCounterValue(line: previous) {
+                    if existing == page {
+                        removed.insert(previous)
+                        insertAfter[chapter.endLine, default: []].append(lines[previous])
+                        notes.append(PageCounterNote(line: chapter.startLine + 1, kind: .legacyCounterMoved(page: page)))
+                    } else {
+                        notes.append(PageCounterNote(
+                            line: chapter.startLine + 1,
+                            kind: .conflictingCounterBeforeChapter(existing: existing, expected: page)
+                        ))
+                    }
                     continue
                 }
-                if style == .arabic,
-                   !hasPageCounter(lines, at: end + 1),
-                   !hasPageCounter(lines, at: i - 1),
-                   let page = nearestMarkerPage(atOrBefore: i - 1) {
-                    insertions.append((end, page))
-                }
-                i = end + 1
-                continue
+                insertCounter(page: page, afterLine: chapter.endLine, anchorLine: chapter.startLine)
             }
-
-            i += 1
         }
 
-        guard !insertions.isEmpty else { return source }
-
-        var resultLines = lines
-        for insertion in insertions.sorted(by: { $0.afterLine > $1.afterLine }) {
-            resultLines.insert("\\setcounter{page}{\(insertion.page)}", at: insertion.afterLine + 1)
+        guard !insertAfter.isEmpty || !removed.isEmpty else {
+            return PageCounterReport(result: source, notes: notes)
         }
-        return resultLines.joined(separator: "\n")
+        var output: [String] = []
+        output.reserveCapacity(lines.count + insertAfter.count)
+        for (index, line) in lines.enumerated() {
+            if !removed.contains(index) { output.append(line) }
+            if let extra = insertAfter[index] { output.append(contentsOf: extra) }
+        }
+        return PageCounterReport(result: output.joined(separator: "\n"), notes: notes)
+    }
+
+    /// 相容 API：回傳 `applyPageCounters(_:)` 的改寫結果。
+    public static func insertPageCounters(_ source: String) -> String {
+        applyPageCounters(source).result
     }
 
     // MARK: - Helpers
 
-    /// body 的行範圍：`\begin{document}` 的下一行到 `\end{document}`（不含）。
-    /// 沒有 `\begin{document}` 時整份 source 視為 body。
-    static func documentBodyRange(of lines: [String]) -> Range<Int> {
-        guard let begin = lines.firstIndex(where: { codePortion(of: $0).contains("\\begin{document}") }) else {
-            return 0..<lines.count
+    /// `\chapter` 名稱之後：可選 `*`、可選 `[短標題]`、必要 `{章名}`（其間可有空白、換行、註解）。
+    /// 回傳章名閉合大括號之後的 offset；找不到或超出 body 時回傳 nil。
+    private static func chapterCommandEnd(_ scan: LaTeXSourceScan, after offset: Int) -> Int? {
+        var k = scan.skipIgnorable(from: offset)
+        if k < scan.units.count && scan.units[k] == U.star && scan.kinds[k] == .code {
+            k = scan.skipIgnorable(from: k + 1)
         }
-        let end = lines[(begin + 1)...].firstIndex(where: {
-            codePortion(of: $0).contains("\\end{document}")
-        }) ?? lines.count
-        return (begin + 1)..<end
+        if k < scan.units.count && scan.units[k] == U.openBracket && scan.kinds[k] == .code {
+            guard let end = scan.optionalEnd(from: k) else { return nil }
+            k = scan.skipIgnorable(from: end)
+        }
+        guard let end = scan.groupEnd(from: k), end <= scan.body.upperBound else { return nil }
+        return end
     }
 
-    /// body 內的 `%% === Page N ===` 標記（行號與頁碼），依行號排序。
-    static func pageMarkers(in lines: [String], within body: Range<Int>) -> [(line: Int, page: Int)] {
-        let pattern = #"^\s*%%\s*===\s*Page\s+(\d+)\s*==="#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        var markers: [(line: Int, page: Int)] = []
-        for i in body {
-            let ns = lines[i] as NSString
-            guard let match = regex.firstMatch(in: lines[i], range: NSRange(location: 0, length: ns.length)),
-                  let page = Int(ns.substring(with: match.range(at: 1))) else { continue }
-            markers.append((i, page))
-        }
-        return markers
-    }
-
-    /// 一行中註解（未跳脫的 `%`）之前的部分。
-    static func codePortion(of line: String) -> String {
-        var backslashes = 0
-        for index in line.indices {
-            let ch = line[index]
-            if ch == "%" && backslashes % 2 == 0 {
-                return String(line[..<index])
+    /// 控制字若是頁碼樣式切換指令（封閉列舉），回傳其樣式。
+    private static func numberingStyle(of word: LaTeXSourceScan.ControlWord, in scan: LaTeXSourceScan) -> PageNumberingStyle? {
+        switch word.name {
+        case "frontmatter":
+            return .roman
+        case "mainmatter":
+            return .arabic
+        case "pagenumbering":
+            let open = scan.skipIgnorable(from: word.end)
+            guard let end = scan.groupEnd(from: open) else { return nil }
+            switch scan.codeText((open + 1)..<(end - 1)).trimmingCharacters(in: .whitespacesAndNewlines) {
+            case "arabic": return .arabic
+            case "roman", "Roman": return .roman
+            default: return .unmanaged
             }
-            backslashes = (ch == "\\") ? backslashes + 1 : 0
+        default:
+            return nil
         }
-        return line
+    }
+}
+
+// MARK: - Internal Types
+
+private struct ChapterCommand {
+    let offset: Int
+    let startLine: Int
+    let endLine: Int
+}
+
+private struct NumberingSwitch {
+    let offset: Int
+    let line: Int
+    let style: PageNumberingStyle
+}
+
+private enum PageCounterEvent {
+    case firstMarker(LaTeXSourceScan.PageMarker)
+    case numberingSwitch(NumberingSwitch)
+    case chapter(ChapterCommand)
+
+    var offset: Int {
+        switch self {
+        case .firstMarker(let marker): return marker.offset
+        case .numberingSwitch(let change): return change.offset
+        case .chapter(let chapter): return chapter.offset
+        }
+    }
+}
+
+private struct AnchorContext {
+    let scan: LaTeXSourceScan
+    let chapterStartLines: Set<Int>
+    let chapterEndLines: Set<Int>
+    let switchLines: Set<Int>
+
+    private static let counterRegex = try! NSRegularExpression(pattern: #"^\\setcounter\{page\}\{\s*(\d+)\s*\}$"#)
+
+    func nearestPage(before offset: Int) -> Int? {
+        scan.pageMarkers.last(where: { $0.offset <= offset })?.page
     }
 
-    private static let chapterStartRegex = try! NSRegularExpression(pattern: #"^\s*\\chapter\*?\s*[\[{]"#)
-
-    static func isChapterStart(_ code: String) -> Bool {
-        let range = NSRange(location: 0, length: (code as NSString).length)
-        return chapterStartRegex.firstMatch(in: code, range: range) != nil
+    /// 該行作用中的程式碼（去掉註解後、去頭尾空白與 CRLF 的 `\r`）；不作用中則為 nil。
+    private func activeCode(line: Int) -> String? {
+        guard line >= 0, line < scan.lineStarts.count,
+              let first = scan.firstNonBlank(line: line), scan.isActive(first) else { return nil }
+        return scan.codeText(scan.lineRange(line)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static let numberingSwitchRegex = try! NSRegularExpression(
-        pattern: #"\\(frontmatter|mainmatter)(?![A-Za-z])|\\pagenumbering\s*\{\s*([A-Za-z]+)\s*\}"#
-    )
+    func hasPageCounter(line: Int) -> Bool {
+        activeCode(line: line)?.hasPrefix("\\setcounter{page}") ?? false
+    }
 
-    /// 行內最後一個頁碼樣式切換指令（封閉列舉）；沒有則回傳 nil。
-    static func numberingSwitch(in code: String) -> PageNumberingStyle? {
+    func pageCounterValue(line: Int) -> Int? {
+        guard let code = activeCode(line: line) else { return nil }
         let ns = code as NSString
-        guard let match = numberingSwitchRegex.matches(
-            in: code, range: NSRange(location: 0, length: ns.length)
-        ).last else { return nil }
-
-        if match.range(at: 1).location != NSNotFound {
-            return ns.substring(with: match.range(at: 1)) == "frontmatter" ? .roman : .arabic
+        guard let match = Self.counterRegex.firstMatch(in: code, range: NSRange(location: 0, length: ns.length)) else {
+            return nil
         }
-        switch ns.substring(with: match.range(at: 2)) {
-        case "arabic": return .arabic
-        case "roman", "Roman": return .roman
-        default: return .unmanaged
-        }
+        return Int(ns.substring(with: match.range(at: 1)))
     }
 
-    private static func hasPageCounter(_ lines: [String], at index: Int) -> Bool {
-        guard lines.indices.contains(index) else { return false }
-        return lines[index].trimmingCharacters(in: .whitespaces).hasPrefix("\\setcounter{page}")
-    }
-
-    /// 下一個有內容的行（略過空行與註解行）是否為章節或頁碼切換指令。
-    private static func nextContentLineTakesOver(_ lines: [String], after index: Int, within body: Range<Int>) -> Bool {
-        var j = index + 1
-        while j < body.upperBound {
-            let code = codePortion(of: lines[j]).trimmingCharacters(in: .whitespaces)
+    /// 下一個有內容的行（略過空行與只有註解的行）是否為章節或切換指令。
+    func nextContentLineTakesOver(after line: Int) -> Bool {
+        var next = line + 1
+        while next < scan.lineStarts.count && scan.lineStarts[next] < scan.body.upperBound {
+            let code = scan.codeText(scan.lineRange(next)).trimmingCharacters(in: .whitespacesAndNewlines)
             if code.isEmpty {
-                j += 1
+                next += 1
                 continue
             }
-            return isChapterStart(code) || numberingSwitch(in: code) != nil
+            return chapterStartLines.contains(next) || switchLines.contains(next)
         }
         return false
-    }
-
-    /// `\chapter` 指令（可選 `*`、可選 `[短標題]`、必要 `{標題}`）結束於哪一行。
-    /// 大括號不平衡或超過 20 行仍未閉合時回傳 nil（保守：不插入）。
-    static func chapterCommandEndLine(_ lines: [String], start: Int, limit: Int) -> Int? {
-        enum Phase { case name, optional, mandatory }
-        var phase = Phase.name
-        var depth = 0
-        var starAllowed = true
-        let lastLine = min(limit, start + 20)
-
-        var j = start
-        while j < lastLine {
-            let code = codePortion(of: lines[j])
-            let chars = Array(code)
-            var k = 0
-            if j == start {
-                guard let range = code.range(of: "\\chapter") else { return nil }
-                k = code.distance(from: code.startIndex, to: range.upperBound)
-            }
-            while k < chars.count {
-                let ch = chars[k]
-                switch phase {
-                case .name:
-                    if ch == "*" && starAllowed {
-                        starAllowed = false
-                    } else if ch == "[" {
-                        phase = .optional
-                        depth = 0
-                    } else if ch == "{" {
-                        phase = .mandatory
-                        depth = 1
-                    } else if !ch.isWhitespace {
-                        return nil
-                    }
-                case .optional:
-                    if ch == "\\" {
-                        k += 1
-                    } else if ch == "{" {
-                        depth += 1
-                    } else if ch == "}" {
-                        depth -= 1
-                    } else if ch == "]" && depth == 0 {
-                        phase = .name
-                        starAllowed = false
-                    }
-                case .mandatory:
-                    if ch == "\\" {
-                        k += 1
-                    } else if ch == "{" {
-                        depth += 1
-                    } else if ch == "}" {
-                        depth -= 1
-                        if depth == 0 { return j }
-                    }
-                }
-                k += 1
-            }
-            j += 1
-        }
-        return nil
     }
 }
