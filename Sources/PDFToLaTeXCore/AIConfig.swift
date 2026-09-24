@@ -25,11 +25,18 @@ public struct AIConfig: Codable, Sendable, Equatable {
     /// 不要讀這個欄位（PsychQuant/pdf-to-latex-swift#11）。這個欄位本身繼續保留、繼續更新，
     /// 只為了相容既有讀取端（如 `config ocr list` 印出的 backend）。
     public var ocrDefaultBackend: String
-    /// 使用者透過 `setOCRDefaultBackend(_:)` 明確設定過的後端；`nil` 表示從未設定過。
-    /// 與 `ocrDefaultBackend` 不同，這個欄位沒有非 nil 的 struct 預設值，也**不會**從舊的
-    /// `ocrDefaultBackend` key 推斷（那個 key 可能只是無關命令寫入的預設值，不代表使用者的
-    /// 選擇）。讀取端要判斷「使用者是否設定過 OCR 後端」應該讀這個欄位，不是
-    /// `ocrDefaultBackend`（PsychQuant/pdf-to-latex-swift#11）。
+    /// 使用者明確設定過的 OCR 後端；`nil` 表示從未經由正式入口設定過。與 `ocrDefaultBackend`
+    /// 不同，這個欄位沒有非 nil 的 struct 預設值，decode 時也**不會**從舊的 `ocrDefaultBackend`
+    /// key 推斷（那個 key 可能只是無關命令寫入的預設值，不代表使用者的選擇）。讀取端要判斷
+    /// 「使用者是否設定過 OCR 後端」應該讀這個欄位，不是 `ocrDefaultBackend`
+    /// （PsychQuant/pdf-to-latex-swift#11）。
+    ///
+    /// **這個保證僅限於「經由 `setOCRDefaultBackend(_:)` 設定」這條路徑**，不是型別層級強制的
+    /// 不變量（Codex R2 審查）：這是 `public var`，呼叫端仍可以直接賦值、或用帶
+    /// `ocrDefaultBackendOverride:` 參數的 `init(...)` 直接建構出非 nil 值，繞過 setter。
+    /// 讀到非 nil 值只代表「這個值曾經被寫入過」，不是「一定經過 setter」；經由正式入口
+    /// （`setOCRDefaultBackend`）設定的呼叫端可以信任它與 `ocrDefaultBackend` 同步，繞過入口
+    /// 直接賦值的呼叫端則自負同步之責，型別本身不會替你保證。
     public var ocrDefaultBackendOverride: String?
 
     public init(
