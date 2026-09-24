@@ -455,7 +455,9 @@ public struct LaTeXNormalizer: Sendable {
         // 12. 確保 \end{document} 存在
         mainSource = Self.ensureEndDocument(mainSource)
 
-        // 13. 在章節邊界設定原始頁碼
+        // 13. 還原原始頁碼（第一個 page marker、章節邊界、切回 arabic）。
+        //     依賴 %% === Page N === 標記，必須在步驟 15 移除標記之前執行，
+        //     也必須在 5.5／5.6 章節修正之後執行（才看得到修正後的 \chapter）。
         mainSource = Self.insertPageCounters(mainSource)
 
         // 14. 修正圖片 scale（需要 manifest + responses）
