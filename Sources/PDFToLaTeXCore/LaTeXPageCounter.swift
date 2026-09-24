@@ -1,19 +1,28 @@
 import Foundation
 
-// MARK: - Page Counter Insertion (PsychQuant/macdoc#9)
+// MARK: - Page Counter Insertion (PsychQuant/macdoc#9, #211)
 
 /// 頁碼還原過程中的一筆紀錄。
 public struct PageCounterNote: Sendable, Equatable {
     /// 紀錄類別（封閉列舉）。
     public enum Kind: Sendable, Equatable {
-        /// 在錨點之後插入了 `\setcounter{page}{page}`。
+        /// 在錨點之後插入了 `\setcounter{page}{page}`。有 page labels 時 `page` 是 label 的值
+        /// （羅馬數字也以整數表示）。
         case counterInserted(page: Int)
-        /// `\chapter` 前一行、值與 marker 相同的 counter（舊版的放法）已移到章名之後。
+        /// `\chapter` 前一行、值與目標頁碼相同的 counter（舊版的放法）已移到章名之後。
         case legacyCounterMoved(page: Int)
-        /// `\chapter` 前一行的 counter 值與 marker 推得的不同：原樣保留，該章不插入。
+        /// `\chapter` 前一行的 counter 值與目標頁碼不同：原樣保留，該章不插入。
         case conflictingCounterBeforeChapter(existing: Int, expected: Int)
         /// 找不到 `\chapter` 章名的閉合大括號：整份原始碼不動。
         case chapterTitleNotFound
+        /// 在錨點之後插入了 `\pagenumbering{style}`：page label 的樣式與當時的頁碼樣式不同
+        /// （PsychQuant/macdoc#211）。
+        case numberingInserted(style: PageNumberStyle)
+        /// 錨點所在頁的 page label 不是阿拉伯數字或標準羅馬數字（例如 `A-1`、`a`、空字串）：
+        /// 該錨點不插入（PsychQuant/macdoc#211）。
+        case pageLabelUnsupported(page: Int, label: String)
+        /// 有 page labels，但錨點所在頁（marker 的頁號）沒有 label：該錨點不插入（PsychQuant/macdoc#211）。
+        case pageLabelMissing(page: Int)
     }
 
     /// 錨點在輸入原始碼中的行號（1 起算）：marker 行、切換指令所在行、`\chapter` 起始行。
@@ -24,6 +33,13 @@ public struct PageCounterNote: Sendable, Equatable {
         self.line = line
         self.kind = kind
     }
+}
+
+/// page label 能還原的頁碼樣式（PsychQuant/macdoc#211）。raw value 是 `\pagenumbering` 的參數。
+public enum PageNumberStyle: String, Sendable, Equatable {
+    case arabic
+    case roman
+    case romanUpper = "Roman"
 }
 
 /// `applyPageCounters` 的結果。
@@ -37,12 +53,23 @@ public struct PageCounterReport: Sendable, Equatable {
     }
 }
 
-/// 頁碼樣式區段。只由來源中明確寫出、且在該處被執行的指令決定。
+/// 頁碼樣式區段。只由來源中明確寫出、且在該處被執行的指令決定（label 模式下另含本函式插入的
+/// `\pagenumbering`）。
 enum PageNumberingStyle: Equatable {
     case arabic
     case roman
+    /// `\pagenumbering{Roman}`（大寫羅馬數字）。
+    case romanUpper
     /// `\pagenumbering{alph}` 等本函式不管理的樣式。
     case unmanaged
+
+    init(_ style: PageNumberStyle) {
+        switch style {
+        case .arabic: self = .arabic
+        case .roman: self = .roman
+        case .romanUpper: self = .romanUpper
+        }
+    }
 }
 
 extension LaTeXNormalizer {
@@ -96,7 +123,7 @@ extension LaTeXNormalizer {
     ///
     /// 頁碼樣式只由**被執行的**切換指令決定。以下是封閉列舉，不得依性質相似類推其他訊號：
     ///
-    /// - `\frontmatter`、`\pagenumbering{roman}`、`\pagenumbering{Roman}` → roman 區段
+    /// - `\frontmatter`、`\pagenumbering{roman}` → roman 區段；`\pagenumbering{Roman}` → Roman 區段
     /// - `\mainmatter`、`\pagenumbering{arabic}` → arabic 區段
     /// - 其他 `\pagenumbering{…}`（如 `alph`）→ 不受管理的區段
     /// - 出現任何上述指令之前 → arabic（LaTeX 預設）
@@ -107,17 +134,41 @@ extension LaTeXNormalizer {
     /// **都不是** front-matter 證據，不會觸發 roman。
     ///
     /// roman 與不受管理的區段內不插入任何 counter：marker 是實體頁序，不是該區段的頁標籤。
-    /// 本函式不輸出 `\pagenumbering`：承認的證據就是上列指令本身，它們已完成切換；本函式只在
-    /// 切回 arabic 後把被重設為 1 的 counter 還原成原書頁碼。PDF page labels 尚未納入此契約。
+    /// 沒有 page labels 時本函式不輸出 `\pagenumbering`：承認的證據就是上列指令本身，它們已完成
+    /// 切換；本函式只在切回 arabic 後把被重設為 1 的 counter 還原成原書頁碼。有 page labels 時見下節。
+    ///
+    /// ## PDF page labels（PsychQuant/macdoc#211）
+    ///
+    /// `pageLabels`（實體頁號 → PDF 的 page label，通常來自 manifest）不是空的時候進入 label 模式。
+    /// marker 的 N 是實體頁序，label 才是書上印的頁碼，所以錨點的目標（樣式、值）改由 N 那一頁的 label
+    /// 決定（封閉列舉，只有這四種情形）：
+    ///
+    /// 1. label 非空且全為 ASCII 數字 → arabic，值為該數字；
+    /// 2. label 是標準寫法的小寫或大寫羅馬數字（`iv`、`XIV`）→ `roman`／`Roman`，值為其數值；
+    /// 3. 其他 label（`A-1`、`a`、空字串、`iiii`）→ 該錨點不插入，回報 `pageLabelUnsupported`；
+    /// 4. N 沒有 label → 該錨點不插入，回報 `pageLabelMissing`。`/PageLabels` 對每一頁都有定義，缺 label
+    ///    表示 marker 與 manifest 對不上；退回實體頁序等於用猜的。
+    ///
+    /// 錨點仍是上列三類，另加 roman 與不受管理的切換指令（它們把 counter 重設為 1，需要以 label 還原）。
+    /// 錨點的目標樣式與當時的頁碼樣式（LaTeX 預設 arabic，之後由被執行的切換指令與本函式插入的
+    /// `\pagenumbering` 決定）不同時，先插入 `\pagenumbering{樣式}` 再插入 counter；label 與原始碼的
+    /// 切換指令不一致時以 label 為準。roman 區段也插入 counter。
+    ///
+    /// 已處理的判定多一種：錨點之後的下一個 token 是 `\pagenumbering{目標樣式}`，它之後是
+    /// `\setcounter{page}`。錨點之後已有 counter 時沿用它的值（與沒有 label 時相同），只在樣式不同時
+    /// 補上 `\pagenumbering`。
+    ///
+    /// `pageLabels` 是空的（PDF 沒有 `/PageLabels`、或舊 manifest）→ 維持上述行為，輸出一字不差。
     ///
     /// ## 冪等
     ///
     /// 已處理過的錨點後面都跟著 counter，重跑不再插入；舊版 counter 移過之後不再位於章前。
-    public static func applyPageCounters(_ source: String) -> PageCounterReport {
+    public static func applyPageCounters(_ source: String, pageLabels: [Int: String] = [:]) -> PageCounterReport {
         let scan = LaTeXSourceScan(source)
         guard let firstMarker = scan.pageMarkers.first else {
             return PageCounterReport(result: source, notes: [])
         }
+        let labelMode = !pageLabels.isEmpty
 
         var chapters: [ChapterCommand] = []
         for word in scan.controlWords where word.name == "chapter" && scan.isActive(word.start) {
@@ -151,6 +202,15 @@ extension LaTeXNormalizer {
             ownedLegacyLines: [:]
         )
 
+        /// label 模式：錨點所在頁（marker 的頁號）的目標；不可用時回傳原因。
+        func lookup(page: Int) -> LabelLookup {
+            guard let label = pageLabels[page] else { return .problem(.pageLabelMissing(page: page)) }
+            guard let parsed = parsePageLabel(label) else {
+                return .problem(.pageLabelUnsupported(page: page, label: label))
+            }
+            return .target(PageTarget(style: parsed.style, value: parsed.value))
+        }
+
         // 先決定哪些舊版 counter 會被移走（由最後一章往前：「後面已有 counter」的判定只看後面），
         // 之後所有判定都把這些行當成已經不在，也就是用第二輪會看到的文件來判斷。
         var styleAtChapter: [Int: PageNumberingStyle] = [:]
@@ -163,12 +223,19 @@ extension LaTeXNormalizer {
             }
         }
         for chapter in chapters.reversed() {
-            guard styleAtChapter[chapter.offset] == .arabic,
-                  let page = context.nearestPage(before: chapter.offset),
-                  !context.pageCounterFollows(chapter.end) else { continue }
+            guard let page = context.nearestPage(before: chapter.offset) else { continue }
+            let value: Int
+            if labelMode {
+                guard case .target(let target) = lookup(page: page),
+                      !context.counterFollows(chapter.end, throughNumbering: true) else { continue }
+                value = target.value
+            } else {
+                guard styleAtChapter[chapter.offset] == .arabic, !context.pageCounterFollows(chapter.end) else { continue }
+                value = page
+            }
             let previous = chapter.startLine - 1
             if chapter.firstOnLine, !context.chapterEndLines.contains(previous - 1),
-               context.pageCounterValue(line: previous) == page {
+               context.pageCounterValue(line: previous) == value {
                 context.ownedLegacyLines[previous] = chapter.offset
             }
         }
@@ -182,43 +249,107 @@ extension LaTeXNormalizer {
             notes.append(PageCounterNote(line: anchorLine + 1, kind: .counterInserted(page: page)))
         }
 
+        /// label 模式：取得錨點頁的目標；不可用時記下原因並回傳 nil。
+        func resolveTarget(page: Int, anchorLine: Int) -> PageTarget? {
+            switch lookup(page: page) {
+            case .target(let target):
+                return target
+            case .problem(let kind):
+                notes.append(PageCounterNote(line: anchorLine + 1, kind: kind))
+                return nil
+            }
+        }
+
+        /// label 模式：在錨點結尾之後套用目標樣式與值（見「PDF page labels」一節），之後的樣式即為目標樣式。
+        func applyTarget(_ target: PageTarget, after end: Int, anchorLine: Int) {
+            let targetStyle = PageNumberingStyle(target.style)
+            defer { style = targetStyle }
+            let numbering = "\\pagenumbering{\(target.style.rawValue)}"
+            if context.pageCounterFollows(end) {
+                guard targetStyle != style else { return }
+                edits.append(context.insertion(after: end, text: numbering))
+                notes.append(PageCounterNote(line: anchorLine + 1, kind: .numberingInserted(style: target.style)))
+                return
+            }
+            if context.numberingThenCounterFollows(end, style: targetStyle) { return }
+            var text = "\\setcounter{page}{\(target.value)}"
+            if targetStyle != style {
+                text = numbering + scan.lineEnding + text
+                notes.append(PageCounterNote(line: anchorLine + 1, kind: .numberingInserted(style: target.style)))
+            }
+            edits.append(context.insertion(after: end, text: text))
+            notes.append(PageCounterNote(line: anchorLine + 1, kind: .counterInserted(page: target.value)))
+        }
+
         for event in events {
             switch event {
             case .numberingSwitch(let change):
                 style = change.style
-                guard change.style == .arabic, scan.body.contains(change.offset),
-                      change.end <= scan.body.upperBound,
+                guard scan.body.contains(change.offset), change.end <= scan.body.upperBound,
                       !context.nextTokenTakesOver(after: change.end),
-                      !context.pageCounterFollows(change.end),
                       let page = context.nearestPage(before: change.offset) else { continue }
-                insertCounter(page: page, after: change.end, anchorLine: change.line)
+                if labelMode {
+                    guard let target = resolveTarget(page: page, anchorLine: change.line) else { continue }
+                    applyTarget(target, after: change.end, anchorLine: change.line)
+                } else {
+                    guard change.style == .arabic, !context.pageCounterFollows(change.end) else { continue }
+                    insertCounter(page: page, after: change.end, anchorLine: change.line)
+                }
 
             case .firstMarker(let marker):
                 let end = scan.lineRange(marker.line).upperBound
-                guard style == .arabic,
-                      !context.nextTokenTakesOver(after: end),
-                      !context.pageCounterFollows(end) else { continue }
-                insertCounter(page: marker.page, after: end, anchorLine: marker.line)
+                guard !context.nextTokenTakesOver(after: end) else { continue }
+                if labelMode {
+                    guard let target = resolveTarget(page: marker.page, anchorLine: marker.line) else { continue }
+                    applyTarget(target, after: end, anchorLine: marker.line)
+                } else {
+                    guard style == .arabic, !context.pageCounterFollows(end) else { continue }
+                    insertCounter(page: marker.page, after: end, anchorLine: marker.line)
+                }
 
             case .chapter(let chapter):
-                guard style == .arabic, let page = context.nearestPage(before: chapter.offset) else { continue }
+                guard labelMode || style == .arabic,
+                      let page = context.nearestPage(before: chapter.offset) else { continue }
                 let previous = chapter.startLine - 1
+                let target: PageTarget
+                if labelMode {
+                    guard let resolved = resolveTarget(page: page, anchorLine: chapter.startLine) else { continue }
+                    target = resolved
+                } else {
+                    target = PageTarget(style: .arabic, value: page)
+                }
                 if context.ownedLegacyLines[previous] == chapter.offset {
+                    var text = context.lineContent(previous)
+                    let targetStyle = PageNumberingStyle(target.style)
+                    if targetStyle != style {
+                        text = "\\pagenumbering{\(target.style.rawValue)}" + scan.lineEnding + text
+                        notes.append(PageCounterNote(
+                            line: chapter.startLine + 1, kind: .numberingInserted(style: target.style)
+                        ))
+                    }
                     edits.append((context.wholeLine(previous), ""))
-                    edits.append(context.insertion(after: chapter.end, text: context.lineContent(previous)))
-                    notes.append(PageCounterNote(line: chapter.startLine + 1, kind: .legacyCounterMoved(page: page)))
+                    edits.append(context.insertion(after: chapter.end, text: text))
+                    notes.append(PageCounterNote(
+                        line: chapter.startLine + 1, kind: .legacyCounterMoved(page: target.value)
+                    ))
+                    style = targetStyle
                     continue
                 }
-                guard !context.pageCounterFollows(chapter.end) else { continue }
-                if chapter.firstOnLine, !context.chapterEndLines.contains(previous - 1),
+                if !context.counterFollows(chapter.end, throughNumbering: labelMode), chapter.firstOnLine,
+                   !context.chapterEndLines.contains(previous - 1),
                    let existing = context.pageCounterValue(line: previous) {
                     notes.append(PageCounterNote(
                         line: chapter.startLine + 1,
-                        kind: .conflictingCounterBeforeChapter(existing: existing, expected: page)
+                        kind: .conflictingCounterBeforeChapter(existing: existing, expected: target.value)
                     ))
                     continue
                 }
-                insertCounter(page: page, after: chapter.end, anchorLine: chapter.startLine)
+                if labelMode {
+                    applyTarget(target, after: chapter.end, anchorLine: chapter.startLine)
+                } else {
+                    guard !context.pageCounterFollows(chapter.end) else { continue }
+                    insertCounter(page: page, after: chapter.end, anchorLine: chapter.startLine)
+                }
             }
         }
 
@@ -244,9 +375,86 @@ extension LaTeXNormalizer {
         return PageCounterReport(result: String(decoding: units, as: UTF16.self), notes: notes)
     }
 
-    /// 相容 API：回傳 `applyPageCounters(_:)` 的改寫結果。
-    public static func insertPageCounters(_ source: String) -> String {
-        applyPageCounters(source).result
+    /// 相容 API：回傳 `applyPageCounters(_:pageLabels:)` 的改寫結果。
+    public static func insertPageCounters(_ source: String, pageLabels: [Int: String] = [:]) -> String {
+        applyPageCounters(source, pageLabels: pageLabels).result
+    }
+
+    // MARK: - Page labels (PsychQuant/macdoc#211)
+
+    /// 解析 PDF page label。只有兩種會被採用（封閉列舉，不得依性質相似類推第三種）：
+    ///
+    /// 1. 非空、全為 ASCII 數字 → arabic，值為該數字（超出 `Int` 範圍不採用）；
+    /// 2. 全為小寫、或全為大寫的羅馬數字字母（i v x l c d m），且恰好是其數值的標準寫法
+    ///    （即 `romanNumeral` 的輸出：`iv` 可、`iiii` 不可）→ roman／Roman。
+    ///
+    /// 其他（空字串、帶前綴的 `A-1`、字母編號 `a`、大小寫混用 `Iv`、非 ASCII 數字）都回傳 nil。
+    static func parsePageLabel(_ label: String) -> (style: PageNumberStyle, value: Int)? {
+        guard !label.isEmpty else { return nil }
+        if label.unicodeScalars.allSatisfy({ $0.value >= 0x30 && $0.value <= 0x39 }) {
+            guard let value = Int(label) else { return nil }
+            return (.arabic, value)
+        }
+        let lower = label.lowercased()
+        let style: PageNumberStyle
+        if label == lower {
+            style = .roman
+        } else if label == label.uppercased() {
+            style = .romanUpper
+        } else {
+            return nil
+        }
+        let digits: [Character: Int] = ["i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000]
+        var values: [Int] = []
+        for character in lower {
+            guard let digit = digits[character] else { return nil }
+            values.append(digit)
+        }
+        var total = 0
+        for (index, digit) in values.enumerated() {
+            if index + 1 < values.count && digit < values[index + 1] {
+                total -= digit
+            } else {
+                total += digit
+            }
+        }
+        guard total > 0, romanNumeral(total) == lower else { return nil }
+        return (style, total)
+    }
+
+    /// 正整數的標準小寫羅馬數字，與 TeX `\romannumeral`（LaTeX `\roman`）相同：千位以 m 重複。
+    /// 0 以下回傳空字串。
+    static func romanNumeral(_ value: Int) -> String {
+        guard value > 0 else { return "" }
+        let table: [(amount: Int, numeral: String)] = [
+            (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"),
+            (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+        ]
+        var remaining = value
+        var result = ""
+        for (amount, numeral) in table {
+            while remaining >= amount {
+                result += numeral
+                remaining -= amount
+            }
+        }
+        return result
+    }
+
+    /// manifest.json 記錄的 page labels（實體頁號 → label；PsychQuant/macdoc#211）。沒有 manifest、
+    /// 無法解析、或沒有任何一頁有 label 時為空，頁碼還原即維持沒有 label 的行為（manifest 無法解析時，
+    /// 圖片寬度步驟會回報原因）。
+    static func manifestPageLabels(projectDir: URL) -> [Int: String] {
+        let url = ProjectLayout.manifestURL(for: projectDir)
+        guard FileManager.default.fileExists(atPath: url.path),
+              let manifest = try? ManifestStore().load(from: url) else { return [:] }
+        var labels: [Int: String] = [:]
+        for page in manifest.pages {
+            if let label = page.label, labels[page.number] == nil {
+                labels[page.number] = label
+            }
+        }
+        return labels
     }
 
     // MARK: - Helpers
@@ -267,7 +475,7 @@ extension LaTeXNormalizer {
     }
 
     /// 控制字若是頁碼樣式切換指令（封閉列舉），回傳其樣式與整個指令（含參數）的結尾 offset。
-    private static func numberingSwitch(
+    fileprivate static func numberingSwitch(
         _ word: LaTeXSourceScan.ControlWord, in scan: LaTeXSourceScan
     ) -> (PageNumberingStyle, Int)? {
         switch word.name {
@@ -279,7 +487,8 @@ extension LaTeXNormalizer {
             guard let argument = scan.readGroupArgument(from: word.end) else { return nil }
             switch argument.text.trimmingCharacters(in: .whitespacesAndNewlines) {
             case "arabic": return (.arabic, argument.range.upperBound)
-            case "roman", "Roman": return (.roman, argument.range.upperBound)
+            case "roman": return (.roman, argument.range.upperBound)
+            case "Roman": return (.romanUpper, argument.range.upperBound)
             default: return (.unmanaged, argument.range.upperBound)
             }
         default:
@@ -298,6 +507,17 @@ private struct ChapterCommand {
     let endLine: Int
     /// `\chapter` 是否為該行第一個 token（舊版 counter 的判定只適用於這種）。
     let firstOnLine: Bool
+}
+
+/// label 模式下一個錨點的目標（PsychQuant/macdoc#211）。
+private struct PageTarget {
+    let style: PageNumberStyle
+    let value: Int
+}
+
+private enum LabelLookup {
+    case target(PageTarget)
+    case problem(PageCounterNote.Kind)
 }
 
 private struct NumberingSwitch {
@@ -371,6 +591,29 @@ private struct AnchorContext {
               let word = scan.controlWords.first(where: { $0.start == next }), word.name == "setcounter",
               let argument = scan.readGroupArgument(from: word.end) else { return false }
         return argument.text.trimmingCharacters(in: .whitespaces) == "page"
+    }
+
+    /// 結尾之後的下一個 token（不跨過 page marker）若是作用中的 `\pagenumbering{…}`，回傳其樣式與結尾。
+    func pagenumberingFollows(_ end: Int) -> (style: PageNumberingStyle, end: Int)? {
+        guard let next = nextToken(after: end, stopAtMarker: true),
+              next < scan.body.upperBound, scan.isActive(next),
+              let word = scan.controlWords.first(where: { $0.start == next }), word.name == "pagenumbering",
+              let (style, switchEnd) = LaTeXNormalizer.numberingSwitch(word, in: scan) else { return nil }
+        return (style, switchEnd)
+    }
+
+    /// 結尾之後是 `\pagenumbering{style}`，它之後是 `\setcounter{page}`（label 模式插入的形式）。
+    func numberingThenCounterFollows(_ end: Int, style: PageNumberingStyle) -> Bool {
+        guard let following = pagenumberingFollows(end), following.style == style else { return false }
+        return pageCounterFollows(following.end)
+    }
+
+    /// 結尾之後已有 counter：直接是 `\setcounter{page}`，或（`throughNumbering`）是任一
+    /// `\pagenumbering{…}` 之後的 `\setcounter{page}`。
+    func counterFollows(_ end: Int, throughNumbering: Bool) -> Bool {
+        if pageCounterFollows(end) { return true }
+        guard throughNumbering, let following = pagenumberingFollows(end) else { return false }
+        return pageCounterFollows(following.end)
     }
 
     /// 插在錨點結尾之後：同一行還有程式碼就在結尾處斷行，否則插在下一行開頭。

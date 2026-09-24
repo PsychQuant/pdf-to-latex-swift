@@ -466,7 +466,9 @@ public struct LaTeXNormalizer: Sendable {
         // 13. 還原原始頁碼（第一個 page marker、章節邊界、切回 arabic）。
         //     依賴 %% === Page N === 標記，必須在步驟 15 移除標記之前執行，
         //     也必須在 5.5／5.6 章節修正之後執行（才看得到修正後的 \chapter）。
-        let pageCounters = Self.applyPageCounters(mainSource)
+        //     manifest 有 PDF page labels 時依 label 決定樣式與值（PsychQuant/macdoc#211）。
+        let pageLabels = Self.manifestPageLabels(projectDir: mainTexURL.deletingLastPathComponent())
+        let pageCounters = Self.applyPageCounters(mainSource, pageLabels: pageLabels)
         mainSource = pageCounters.result
 
         // 13.5 有章節頁的頁碼是偶數時改用 openany（PsychQuant/macdoc#210）：book 預設的 openright

@@ -54,10 +54,13 @@ public struct PageRecord: Codable, Sendable {
     public var rotation: Int
     public var renderedImagePath: String?
     public var renderedDPI: Double?
+    /// PDF 的 page label（`/PageLabels`，例如 `iv`、`12`、`A-3`），原樣記錄（PsychQuant/macdoc#211）。
+    /// 只有 PDF 真的有 `/PageLabels` 時才有值；舊 manifest 沒有這個欄位，解碼為 nil。
+    public var label: String?
 
     public init(
         number: Int, width: Double, height: Double, rotation: Int,
-        renderedImagePath: String?, renderedDPI: Double?
+        renderedImagePath: String?, renderedDPI: Double?, label: String? = nil
     ) {
         self.number = number
         self.width = width
@@ -65,6 +68,7 @@ public struct PageRecord: Codable, Sendable {
         self.rotation = rotation
         self.renderedImagePath = renderedImagePath
         self.renderedDPI = renderedDPI
+        self.label = label
     }
 }
 
@@ -166,12 +170,15 @@ public struct PDFPageSnapshot: Sendable {
     public var width: Double
     public var height: Double
     public var rotation: Int
+    /// PDF 的 page label；PDF 沒有 `/PageLabels` 時為 nil（見 `PDFScanner.scan`）。
+    public var label: String?
 
-    public init(number: Int, width: Double, height: Double, rotation: Int) {
+    public init(number: Int, width: Double, height: Double, rotation: Int, label: String? = nil) {
         self.number = number
         self.width = width
         self.height = height
         self.rotation = rotation
+        self.label = label
     }
 }
 

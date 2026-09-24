@@ -49,7 +49,8 @@ struct RenderPagesCommand: AsyncParsableCommand {
                     height: $0.height,
                     rotation: $0.rotation,
                     renderedImagePath: nil,
-                    renderedDPI: nil
+                    renderedDPI: nil,
+                    label: $0.label
                 )
             }
         }
