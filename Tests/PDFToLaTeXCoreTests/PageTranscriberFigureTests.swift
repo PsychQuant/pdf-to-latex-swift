@@ -331,19 +331,80 @@ final class PageTranscriberFigureTests: XCTestCase {
         XCTAssertEqual(PageTranscriber.resolvedPageImagePath(forPage: 6, in: pages), "pages/page-0006.png")
     }
 
-    /// AI 回傳的頁碼不在這一批送出去的頁面裡（批次外頁碼），但 manifest 裡有這一頁、也渲染過：
-    /// 要用它自己的圖，不能 fallback 成批次裡任何別的頁面圖（#221 的核心場景）。
-    func testResolvedPageImagePathFindsPageOutsideRequestedBatch() {
-        // 模擬批次只送出 [1, 2] 的 imagePaths，但 AI 回應裡混進了第 7 頁（批次外頁碼）。
-        // manifest 涵蓋整本書，第 7 頁早就渲染過、有自己的圖。
+    /// `resolvedPageImagePath` 本身是通用查找，不知道也不管「批次」是什麼——給它什麼清單就在
+    /// 那份清單裡查。這個行為是 `migrateFigureCrops`（不呼叫 AI 的遷移入口）依賴的：它刻意傳整份
+    /// manifest，因為它沒有批次概念，bbox 是舊 responses 資料本身就跟頁碼綁定的
+    /// （PsychQuant/macdoc#221 第二輪審查釐清：`transcribe()` 不能這樣用，見下面
+    /// `testBatchRestrictedPageRecordsExcludesPagesOutsideTheBatch` 與
+    /// `testTranscribeStylePipelineRejectsPageOutsideBatchEvenWhenManifestHasIt`）。
+    func testResolvedPageImagePathFindsAnyPageInGivenList() {
         let manifestPages = [
             record(1, image: "pages/page-0001.png"),
             record(2, image: "pages/page-0002.png"),
             record(7, image: "pages/page-0007.png"),
         ]
-        let resolved = PageTranscriber.resolvedPageImagePath(forPage: 7, in: manifestPages)
-        XCTAssertEqual(resolved, "pages/page-0007.png")
-        XCTAssertNotEqual(resolved, "pages/page-0001.png", "不可 fallback 到批次第一張圖")
+        XCTAssertEqual(
+            PageTranscriber.resolvedPageImagePath(forPage: 7, in: manifestPages), "pages/page-0007.png"
+        )
+    }
+
+    /// `batchRestrictedPageRecords` 把 manifest 限制在批次頁碼內——這才是 `transcribe()` 防止
+    /// 「批次外頁碼被裁切」的實際機制（PsychQuant/macdoc#221 第二輪審查：光是拿掉
+    /// `?? imagePaths.first`、改查整份 manifest 不夠，manifest 裡剛好有那一頁的渲染圖，不代表這批
+    /// 回應的 bbox 適用於那張圖）。
+    func testBatchRestrictedPageRecordsExcludesPagesOutsideTheBatch() {
+        let manifestPages = [
+            record(1, image: "pages/page-0001.png"),
+            record(2, image: "pages/page-0002.png"),
+            record(8, image: "pages/page-0008.png"),
+        ]
+        let restricted = PageTranscriber.batchRestrictedPageRecords(manifestPages, batchPages: [1, 2])
+        XCTAssertEqual(restricted.map(\.number).sorted(), [1, 2], "第 8 頁不在批次裡，不該出現在限制後的清單")
+        XCTAssertNil(
+            PageTranscriber.resolvedPageImagePath(forPage: 8, in: restricted),
+            "批次外頁碼即使 manifest 裡有渲染圖，限制後也查不到"
+        )
+    }
+
+    func testBatchRestrictedPageRecordsKeepsPagesWithinTheBatch() {
+        let manifestPages = [
+            record(1, image: "pages/page-0001.png"),
+            record(2, image: "pages/page-0002.png"),
+            record(8, image: "pages/page-0008.png"),
+        ]
+        let restricted = PageTranscriber.batchRestrictedPageRecords(manifestPages, batchPages: [1, 2])
+        XCTAssertEqual(
+            PageTranscriber.resolvedPageImagePath(forPage: 2, in: restricted), "pages/page-0002.png"
+        )
+    }
+
+    /// 端對端重現 Codex 第二輪審查的具體情境：本批次只送第 1、2 頁；第 8 頁先前已渲染過、
+    /// manifest 有它的圖；AI 把這批某個 figure 誤標成第 8 頁。組合
+    /// `batchRestrictedPageRecords` + `resolvedPageImagePath`（`transcribe()` 實際呼叫的路徑）
+    /// 必須查不到圖，`postProcessPage` 因此不裁切、記 note、引用維持原樣——不能因為 manifest 裡
+    /// 剛好有第 8 頁的圖，就把這批的 bbox 套上去裁。
+    func testTranscribeStylePipelineRejectsPageOutsideBatchEvenWhenManifestHasIt() throws {
+        let batchImage1 = try writePageImage(page: 1, color: Self.red)
+        let page8Image = try writePageImage(page: 8, color: Self.blue)
+        let manifestPages = [record(1, image: batchImage1), record(8, image: page8Image)]
+        let batchPages = [1, 2]
+
+        let restricted = PageTranscriber.batchRestrictedPageRecords(manifestPages, batchPages: batchPages)
+        let resolved = PageTranscriber.resolvedPageImagePath(forPage: 8, in: restricted)
+        XCTAssertNil(resolved, "第 8 頁不在這批 [1, 2] 裡，即使 manifest 有第 8 頁的圖也不該解析出路徑")
+
+        let result = process(
+            page: 8, latex: "\\includegraphics{figures/fig1.png}",
+            figures: [("fig1", [0.1, 0.1, 0.4, 0.4])], image: resolved
+        )
+        XCTAssertFalse(figureFiles().contains(where: { $0.contains("p008") }), "批次外頁碼不該有任何裁切檔被寫出")
+        XCTAssertTrue(
+            result.notes.contains { $0.contains("找不到第 8 頁的頁面圖") },
+            "應該記一筆 note 說明未裁切: \(result.notes)"
+        )
+        XCTAssertEqual(
+            result.latex, "\\includegraphics{figures/fig1.png}", "引用要維持原樣，不能被改寫成裁切檔路徑"
+        )
     }
 
     /// manifest 裡完全沒有這個頁碼（徹底幻覺）：回傳 nil，讓呼叫端不裁切、記 note。
@@ -359,10 +420,11 @@ final class PageTranscriberFigureTests: XCTestCase {
         XCTAssertNil(PageTranscriber.resolvedPageImagePath(forPage: 2, in: pages))
     }
 
-    /// 端對端：批次外頁碼進到 postProcessPage 之後，裁出來的圖必須來自它自己的頁面圖，
-    /// 顏色不能是批次內其他頁面的顏色（直接驗證裁切結果，不只是路徑字串）。
-    func testOutOfBatchPageCropsFromItsOwnImageNotTheBatchFirstImage() throws {
-        // 批次請求的是第 1 頁（紅），但 AI 回應裡夾帶第 7 頁（藍）——批次外頁碼。
+    /// 端對端：`resolvedPageImagePath` 用整份清單查到的圖，裁出來的內容必須來自那一頁自己的圖，
+    /// 顏色不能是清單裡其他頁面的顏色（直接驗證裁切結果，不只是路徑字串）——這是
+    /// `migrateFigureCrops` 實際依賴的行為（它傳整份 manifest，見上面
+    /// `testResolvedPageImagePathFindsAnyPageInGivenList` 的說明）。
+    func testMigrationStyleLookupCropsFromThePagesOwnImageNotAnotherPage() throws {
         let batchFirstImage = try writePageImage(page: 1, color: Self.red)
         let ownImage = try writePageImage(page: 7, color: Self.blue)
         let manifestPages = [record(1, image: batchFirstImage), record(7, image: ownImage)]
