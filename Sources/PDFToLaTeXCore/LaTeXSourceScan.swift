@@ -198,14 +198,20 @@ struct LaTeXSourceScan {
     /// 配對（封閉列舉，不得依性質相似類推）：大括號 `{`／`}`；同名的 `\begin{X}`／`\end{X}`；`\[`／`\]`；
     /// `\(`／`\)`；行內數學 `$`／`$`；展示數學 `$$`／`$$`（同一行相鄰的兩個 `$`，但正在行內數學中時，
     /// 第一個 `$` 先關閉行內數學，例如 `$a$$b$`）；`\begingroup`／`\endgroup`；`\bgroup`／`\egroup`；
-    /// `\left`／`\right`；名稱以 `if` 開頭的控制字（`\iff` 除外，那是數學符號）／`\fi`。
+    /// `\left`／`\right`。
+    ///
+    /// **條件式一律不自成一體**（Codex R4）：段落裡只要有名稱以 `if` 開頭的控制字（`\ifx`、`\ifcase`、
+    /// `\ifdefined`、`\newif` 產生的 `\iffoo`，以及數學符號 `\iff`、LaTeX 的 `\ifthenelse`），或
+    /// `conditionalWords` 裡的任一個（`\or`、`\else`、`\fi`、`\unless`、`\loop`、`\repeat`），就回傳 false。
+    /// 不嘗試配對：`\or`／`\else` 屬於段落外的條件式；`\ifx\next\fi` 裡的 `\fi` 是被比較的 token 而不是結尾；
+    /// `\let\myif\iftrue` 讓任意名稱成為條件式。字面上的配對不代表 TeX 的配對，只有不刪是安全的。
     ///
     /// 只看 code（註解與 verbatim 不算；`\{`、`\}`、`\$` 是字元）。`\begin`、`\end` 的環境名稱必須在同一行
-    /// 讀得到，否則視為不自成一體。判斷錯的方向只會讓段落不被刪（例如 `\ifthenelse` 被當成條件式）。
+    /// 讀得到，否則視為不自成一體。判斷錯的方向只會讓段落不被刪。巨集不展開：以其他名稱定義的條件式
+    /// （例如 `\let\myif\iftrue` 之後的 `\myif`）認不出來。
     func linesAreSelfBalanced(_ lines: [Int]) -> Bool {
         enum Opener: Equatable {
             case brace, environment(String), displayMath, inlineMath, dollar, displayDollar, group, bgroup, left
-            case conditional
         }
         var stack: [Opener] = []
         func close(_ opener: Opener) -> Bool {
@@ -257,9 +263,9 @@ struct LaTeXSourceScan {
                     case "egroup": if !close(.bgroup) { return false }
                     case "left": stack.append(.left)
                     case "right": if !close(.left) { return false }
-                    case "fi": if !close(.conditional) { return false }
-                    case "iff": break
-                    default: if name.hasPrefix("if") { stack.append(.conditional) }
+                    default:
+                        // 條件式相關的控制字：不論是否看起來配對完整，一律不自成一體（見上方說明）。
+                        if name.hasPrefix("if") || Self.conditionalWords.contains(name) { return false }
                     }
                     k = end
                     continue
@@ -288,6 +294,9 @@ struct LaTeXSourceScan {
         }
         return stack.isEmpty
     }
+
+    /// 與條件式相關、名稱不以 `if` 開頭的控制字（封閉列舉）。見 `linesAreSelfBalanced`。
+    static let conditionalWords: Set<String> = ["or", "else", "fi", "unless", "loop", "repeat"]
 
     /// 這一行結尾的換行是否為 verbatim（在它之後插入一行會插進 verbatim 內容）。沒有換行時為 false。
     func lineEndIsVerbatim(_ line: Int) -> Bool {
