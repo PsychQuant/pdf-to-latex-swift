@@ -264,6 +264,63 @@ final class LaTeXPageBoundaryTests: XCTestCase {
         XCTAssertEqual(normalizer.removeCrossPageDuplicates(result), result)
     }
 
+    /// 未加大括號的參數（Codex R6 HIGH）：`\frac x x` 的兩個 `x` 是分子與分母。分頁落在數學模式裡，
+    /// 而且頁尾段落前面是 `\frac`（還在等參數）：兩個否決條件都成立，不刪。
+    func testDedup_unbracedArgumentsAcrossPagesAreKept() {
+        let input = "\\documentclass{article}\n\\begin{document}\n\\[\n\\frac\nx\n%% === Page 2 ===\nx\n\\]\n\\end{document}"
+        let normalizer = LaTeXNormalizer()
+        let result = normalizer.removeCrossPageDuplicates(input)
+        XCTAssertEqual(result, input)
+        XCTAssertEqual(normalizer.removeCrossPageDuplicates(result), result)
+    }
+
+    /// 否決條件：分頁落在數學模式裡（`\[ \]`、`$ $`、`$$ $$`、`\( \)`、數學環境）時整個邊界不刪。
+    func testDedup_boundaryInsideMathIsNeverDeduplicated() {
+        let cases = [
+            "\\begin{equation}\nx + y\n%% === Page 2 ===\nx + y\n\\end{equation}",
+            "\\begin{align*}\na &= b\n%% === Page 2 ===\na &= b\n\\end{align*}",
+            "$x\n+ y\n%% === Page 2 ===\n+ y\n$",
+            "\\(a\nb c\n%% === Page 2 ===\nb c\n\\)",
+            "$$\nsum of terms\n%% === Page 2 ===\nsum of terms\n$$",
+        ]
+        for body in cases {
+            let input = "\\begin{document}\nOpening.\n\(body)\nClosing.\n\\end{document}"
+            XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input, body)
+        }
+        // 數學配對不一致（這裡有一個多出來的 \]）時，無法判斷任何邊界的模式：整份不刪。
+        let stray = "\\begin{document}\nStray \\] here.\nLine B.\n%% === Page 2 ===\nLine B.\n\\end{document}"
+        XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(stray), stray)
+        // 數學在分頁之前已經關閉：照常刪。
+        let closed = "\\begin{document}\nSee $x$ and \\[y\\].\nLine B.\n%% === Page 2 ===\nLine B.\n\\end{document}"
+        XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(closed),
+                       "\\begin{document}\nSee $x$ and \\[y\\].\nLine B.\n%% === Page 2 ===\n\\end{document}")
+    }
+
+    /// 否決條件：頁尾段落前面的程式碼、或段落本身，以控制序列結尾（可能還在等參數）時不刪。
+    func testDedup_pendingControlSequenceVetoes() {
+        let cases = [
+            "\\textbf\nWord here\n%% === Page 2 ===\nWord here",        // 前面的 \textbf 等著參數
+            "Line one \\\\\n%% === Page 2 ===\nLine one \\\\",          // 段落以 \\ 結尾
+            "Some text \\emph\n%% === Page 2 ===\nSome text \\emph",   // 段落以控制字結尾
+            "\\newcommand{\\x}{y}\\textbf % c\nWord here\n%% === Page 2 ===\nWord here",
+        ]
+        for body in cases {
+            let input = "\\begin{document}\nOpening.\n\(body)\nClosing.\n\\end{document}"
+            XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input, body)
+        }
+    }
+
+    /// 否決只會減少刪除（Codex R6 MEDIUM）：計畫固定為第五輪的比對（文字相同＋配對完整＋無條件式），
+    /// 被否決的段落在計畫中仍視為已刪，所以保留下來的行不會讓後面的分頁多刪。Codex 的例子：第五輪計畫
+    /// 刪 7–9 行（含 `{1}`，被否決），第 11 行不能因為第 8、9 行留下來而被刪。
+    func testDedup_vetoesNeverCreateNewDeletions() {
+        let input = "\\documentclass{article}\n\\begin{document}\nA\n{1}\nA\n%% === Page 2 ===\nA\n{1}\nA\n%% === Page 3 ===\nA\n\\end{document}"
+        let plan = LaTeXNormalizer.crossPageDuplicatePlan(input)
+        XCTAssertEqual(plan.planned, [6, 7, 8])
+        XCTAssertEqual(plan.deleted, [])
+        XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input)
+    }
+
     /// 可刪的行必須像正文（Codex R5 後的收窄規則）：去掉控制序列、註解與空白後至少有一個字母或 CJK
     /// 字元，且去掉前導空白後不以 `{`、`[`、`}`、`]`、`&`、`\\` 開頭。段落裡任何一行不符，整段不刪。
     func testDedup_onlyProseLikeLinesAreDeleted() {
@@ -375,6 +432,8 @@ final class LaTeXPageBoundaryTests: XCTestCase {
         // \frac 跨頁（R5）與其他純結構、純參數的行；直接的列表指令（R5）。
         "\\[\n\\frac\n{1}\n%% === Page 60 ===\n{1}\n\\]", "\\frac", "{1}", "\\hline", "\\\\", "& a & b \\\\",
         "\\list{--}{}\n\\item L", "\\endlist",
+        // 未加大括號的參數跨頁（R6）。
+        "\\[\n\\frac\nx\n%% === Page 61 ===\nx\n\\]", "x", "\\textbf\nWord", "Word", "\\[", "\\]",
     ]
 
     private func makeDocument(_ rng: inout SeededGenerator) -> String {
@@ -408,6 +467,12 @@ final class LaTeXPageBoundaryTests: XCTestCase {
 
             let deduped = normalizer.removeCrossPageDuplicates(source)
             XCTAssertEqual(LaTeXSourceScan(deduped).verbatimSegments, verbatim, context)
+            // 否決只會減少刪除：計畫與不加否決時相同，實際刪除是不加否決時刪除的子集。
+            let vetoed = LaTeXNormalizer.crossPageDuplicatePlan(source)
+            let unvetoed = LaTeXNormalizer.crossPageDuplicatePlan(source, applyVetoes: false)
+            XCTAssertEqual(vetoed.planned, unvetoed.planned, context)
+            XCTAssertEqual(unvetoed.deleted, unvetoed.planned, context)
+            XCTAssertTrue(vetoed.deleted.isSubset(of: unvetoed.deleted), context)
             // 只刪自成一體的段落：整份文件的配對狀態不變。
             let sourceScan = LaTeXSourceScan(source)
             let dedupedScan = LaTeXSourceScan(deduped)

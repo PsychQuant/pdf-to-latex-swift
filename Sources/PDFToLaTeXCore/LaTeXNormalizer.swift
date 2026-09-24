@@ -157,29 +157,16 @@ public struct LaTeXNormalizer: Sendable {
 
     /// 移除跨頁邊界的重複行。AI 逐頁轉寫時常把前一頁最後幾行在下一頁開頭又寫一次。
     ///
+    /// 做法分兩層：先依固定的比對規則排出「刪除計畫」，再由否決條件逐段否決。否決只會減少刪除：被否決的
+    /// 段落留在原位，但在計畫裡仍當作已刪（後面的比對看不到它），所以留下來的行不會讓別的地方多刪。最終
+    /// 刪除的行永遠是計畫的子集（`crossPageDuplicatePlan`；Codex R6 MEDIUM）。
+    ///
     /// ## 分頁邊界（PsychQuant/macdoc#215）
     ///
     /// 只認 `LaTeXSourceScan.markerLines`：整行恰好是 `%% === Page N ===`，且那個 `%` 是註解起點、
     /// 不在巨集定義內。verbatim 類環境、`\verb`、其他註解中間長得像 marker 的文字不是邊界。
     ///
-    /// ## 比對（PsychQuant/macdoc#3）
-    ///
-    /// 每個邊界比較前一頁的「頁尾」與下一頁的「頁首」：頁尾是邊界之前、上一個邊界之後最後
-    /// `windowSize` 個可比對行；頁首是邊界之後、下一個邊界之前最前面 `windowSize` 個可比對行。
-    /// 頁尾的最後 k 行與頁首的前 k 行逐行相同（去掉頭尾空格、tab 與 CR 後比較），而且頁首那 k 行同時符合
-    /// 以下兩個條件時，取最大的 k，刪除頁首那 k 行，再重新比較，直到沒有重疊：
-    ///
-    /// - **每一行都像正文**（`LaTeXSourceScan.lineLooksLikeProse`：去掉控制序列、註解與空白後有字母或 CJK
-    ///   字元，且不以 `{ [ } ] &` 或 `\\` 開頭）；
-    /// - **整段結構配對完整、不含條件式**（`LaTeXSourceScan.linesAreSelfBalanced`）。
-    ///
-    /// 只有「連續的一段」重疊才算重複：頁首某一行只是在頁尾出現過（例如 `\centering`、`\end{table}`）不刪。
-    ///
-    /// 為什麼這麼保守：去重是啟發式，AI 在頁尾與頁首重複寫的是正文，而文字相同的結構行常常是不同的東西 ——
-    /// 巢狀列表的內層與外層結尾都是 `\end{itemize}`、`\frac` 的分子與分母都是 `{1}`、`\ifcase` 的兩個分支
-    /// 分隔都是 `\or`、兩段展示數學的結尾與開頭都是 `$$`。這些行能不能刪取決於前後文，行的層次判斷不了
-    /// （Codex R2～R5 逐一找到的反例）。所以不再逐案補洞，而是把可刪的範圍收窄到像正文、配對完整的段落：
-    /// 這兩個條件只會減少刪除，代價是結構行的真重複留著（可以編譯，頂多多一行）。
+    /// ## 計畫（PsychQuant/macdoc#3）
     ///
     /// 每一行屬於以下三類之一（封閉列舉）：
     /// 1. **阻隔**：碰到 verbatim 的行（`LaTeXSourceScan.lineTouchesVerbatim`：`\begin{verbatim}` 那一行、
@@ -190,15 +177,62 @@ public struct LaTeXNormalizer: Sendable {
     ///    不刪，也不打斷比對（夾在重複行之間的空行與註記保留在原位）。
     /// 3. **可比對**：其他行。
     ///
+    /// 每個邊界比較前一頁的「頁尾」與下一頁的「頁首」：頁尾是邊界之前、上一個邊界之後最後
+    /// `windowSize` 個可比對行；頁首是邊界之後、下一個邊界之前最前面 `windowSize` 個可比對行（都不含已在
+    /// 計畫中的行）。頁尾的最後 k 行與頁首的前 k 行逐行相同（去掉頭尾空格、tab 與 CR 後比較），而且頁首那
+    /// k 行整段結構配對完整、不含條件式（`LaTeXSourceScan.linesAreSelfBalanced`）時，取最大的 k，把頁首
+    /// 那 k 行排入計畫，再重新比較，直到沒有重疊。只有「連續的一段」重疊才算重複。
+    ///
+    /// ## 否決（封閉列舉，只有這四個；任一成立整段不刪）
+    ///
+    /// 1. **不像正文**：段落裡有一行不符 `LaTeXSourceScan.lineLooksLikeProse`（去掉控制序列、註解與空白後
+    ///    沒有字母或 CJK 字元，或以 `{ [ } ] &`、`\\` 開頭）。
+    /// 2. **分頁在數學模式裡**：邊界那一行的開頭在數學模式中（`LaTeXSourceScan.mathModeAtLineStarts`）。
+    ///    數學配對在整份文件不一致時，無法判斷任何邊界，整份不刪。
+    /// 3. **前面有控制序列在等參數**：頁尾那段之前最後一行有程式碼的行（略過空行、`%%` 行、已實際刪除的行
+    ///    與只有註解的行）以控制序列結尾（`LaTeXSourceScan.lineEndsWithControlSequence`）。
+    /// 4. **段落本身以控制序列結尾**：段落最後一行以控制序列結尾，頁首那段就可能是它的參數。
+    ///
+    /// 為什麼這麼保守：去重是啟發式，AI 在頁尾與頁首重複寫的是正文；文字相同的結構或參數常常是不同的東西 ——
+    /// 巢狀列表的內層與外層結尾都是 `\end{itemize}`、`\frac` 的分子與分母都是 `{1}` 或 `x`、`\ifcase` 的
+    /// 兩個分支分隔都是 `\or`、兩段展示數學的結尾與開頭都是 `$$`（Codex R2～R6 逐一找到的反例）。它們能不能刪
+    /// 取決於巨集的參數與前後文，在行的層次判斷不了，所以不逐案補洞，而是用否決把可刪的範圍收窄到「文字模式
+    /// 裡、前後沒有指令在等參數、像正文而且配對完整」的段落。代價是數學裡、結構行、以 `\\` 結尾的行的
+    /// 真重複會留下（可以編譯，頂多多一行）。巨集不展開：以其他名稱定義、參數很多的指令認不出來。
+    ///
     /// ## 冪等
     ///
-    /// 只刪頁首的行，邊界依序處理：處理某個邊界時，前一頁（頁尾所在）已經定案，而每個邊界都刪到
-    /// 沒有重疊為止，所以第二輪不會再刪。
+    /// 只刪頁首的行，邊界依序處理，每個邊界都排到沒有重疊為止。實際刪除的段落配對完整、在文字模式、以
+    /// 像正文的行組成，刪掉它不改變其他邊界的數學模式與「前一行」的判定（否決 3 本來就略過已刪的行），
+    /// 被否決的段落在第二輪會被同樣排入計畫、同樣否決，所以第二輪不會再刪。
     func removeCrossPageDuplicates(_ source: String, windowSize: Int = 5) -> String {
-        guard windowSize > 0, source.contains("===") else { return source }
+        let deleted = Self.crossPageDuplicatePlan(source, windowSize: windowSize).deleted
+        guard !deleted.isEmpty else { return source }
+        let lines = source.components(separatedBy: "\n")
+        let result = lines.enumerated()
+            .filter { !deleted.contains($0.offset) }
+            .map(\.element)
+            .joined(separator: "\n")
+        // 安全網：刪掉的行都不碰到 verbatim，但刪行仍可能改變後文的判定（例如 `\begin% c` 那一行被刪，
+        // 下一行的 `{verbatim}` 就不再是環境名稱）。verbatim 有任何變化就整份不動。
+        guard LaTeXSourceScan(result).verbatimSegments == LaTeXSourceScan(source).verbatimSegments else {
+            return source
+        }
+        return result
+    }
+
+    /// `removeCrossPageDuplicates` 的刪除計畫（0 起算的行號）。`planned` 是計畫排入的所有行（含被否決的），
+    /// `deleted` 是實際刪除的行，永遠是 `planned` 的子集。`applyVetoes` 為 false 時不否決（`deleted ==
+    /// planned`），供測試確認否決只會減少刪除。
+    static func crossPageDuplicatePlan(
+        _ source: String, windowSize: Int = 5, applyVetoes: Bool = true
+    ) -> (planned: Set<Int>, deleted: Set<Int>) {
+        guard windowSize > 0, source.contains("===") else { return ([], []) }
         let scan = LaTeXSourceScan(source)
         let boundaries = scan.markerLines
-        guard !boundaries.isEmpty else { return source }
+        guard !boundaries.isEmpty else { return ([], []) }
+        // nil（數學配對不一致）時否決 2 對每一段都成立；計畫照常排，才能與不否決時比較。
+        let mathAtLineStart = scan.mathModeAtLineStarts()
 
         // scan 的行與以 LF 切開的行一一對應（lineStarts 也只以 LF 分行）。
         let lines = source.components(separatedBy: "\n")
@@ -207,14 +241,40 @@ public struct LaTeXNormalizer: Sendable {
         let barrier = lines.indices.map { scan.lineTouchesVerbatim($0) }
         let skipped = keys.map { $0.isEmpty || $0.hasPrefix("%%") }
 
-        var removed = Set<Int>()
+        var planned = Set<Int>()
+        var deleted = Set<Int>()
+
+        /// 否決 3：`line` 之前最後一行有程式碼的行（略過空行、`%%` 行、已實際刪除的行、只有註解的行）
+        /// 是否以控制序列結尾。
+        func controlSequenceBefore(_ line: Int) -> Bool {
+            var previous = line - 1
+            while previous >= 0 {
+                if !skipped[previous] && !deleted.contains(previous),
+                   let ends = scan.lineEndsWithControlSequence(previous) {
+                    return ends
+                }
+                previous -= 1
+            }
+            return false
+        }
+
+        /// 否決 1～4 都不成立。
+        func accepted(_ block: [Int], tailBlock: [Int], boundary: Int) -> Bool {
+            guard applyVetoes else { return true }
+            guard let math = mathAtLineStart, !math[boundary] else { return false }
+            guard block.allSatisfy({ scan.lineLooksLikeProse($0) }) else { return false }
+            guard let first = tailBlock.first, !controlSequenceBefore(first) else { return false }
+            guard let last = block.last, scan.lineEndsWithControlSequence(last) != true else { return false }
+            return true
+        }
+
         for (position, boundary) in boundaries.enumerated() {
             let pageStart = position > 0 ? boundaries[position - 1] + 1 : 0
             let nextBoundary = position + 1 < boundaries.count ? boundaries[position + 1] : lines.count
             var tail: [Int] = []
             var back = boundary - 1
             while back >= pageStart && tail.count < windowSize && !barrier[back] {
-                if !skipped[back] && !removed.contains(back) { tail.append(back) }
+                if !skipped[back] && !planned.contains(back) { tail.append(back) }
                 back -= 1
             }
             tail.reverse()
@@ -223,28 +283,22 @@ public struct LaTeXNormalizer: Sendable {
                 var head: [Int] = []
                 var forward = boundary + 1
                 while forward < nextBoundary && head.count < windowSize && !barrier[forward] {
-                    if !skipped[forward] && !removed.contains(forward) { head.append(forward) }
+                    if !skipped[forward] && !planned.contains(forward) { head.append(forward) }
                     forward += 1
                 }
                 let overlap = stride(from: min(tail.count, head.count), through: 1, by: -1).first { k in
                     zip(tail.suffix(k), head.prefix(k)).allSatisfy { keys[$0] == keys[$1] }
-                        && head.prefix(k).allSatisfy { scan.lineLooksLikeProse($0) }
                         && scan.linesAreSelfBalanced(Array(head.prefix(k)))
                 } ?? 0
                 guard overlap > 0 else { break }
-                removed.formUnion(head.prefix(overlap))
+                let block = Array(head.prefix(overlap))
+                planned.formUnion(block)
+                if accepted(block, tailBlock: Array(tail.suffix(overlap)), boundary: boundary) {
+                    deleted.formUnion(block)
+                }
             }
         }
-
-        guard !removed.isEmpty else { return source }
-        let result = lines.enumerated()
-            .filter { !removed.contains($0.offset) }
-            .map(\.element)
-            .joined(separator: "\n")
-        // 安全網：刪掉的行都不碰到 verbatim，但刪行仍可能改變後文的判定（例如 `\begin% c` 那一行被刪，
-        // 下一行的 `{verbatim}` 就不再是環境名稱）。verbatim 有任何變化就整份不動。
-        guard LaTeXSourceScan(result).verbatimSegments == scan.verbatimSegments else { return source }
-        return result
+        return (planned, deleted)
     }
 
     /// 跳脫貨幣符號 $（非數學模式的 $）。
