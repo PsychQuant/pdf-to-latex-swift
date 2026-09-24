@@ -199,6 +199,30 @@ final class LaTeXPageBoundaryTests: XCTestCase {
         XCTAssertEqual(normalizer.removeCrossPageDuplicates(input), input)
     }
 
+    /// 分頁落在對齊環境裡（Codex R7 HIGH）：`\multicolumn{1}` 之後兩個沒加大括號的 `c` 分別是欄位格式與
+    /// 儲存格內容，不是重複的正文；刪掉第二個，pdflatex 報 `Missing \endcsname inserted.`。表格裡的參數與
+    /// 儲存格邊界在行的層次判斷不了，所以邊界落在對齊環境裡就整段不刪（否決 5），比照數學模式。
+    func testDedup_pageBreakInsideAnAlignmentEnvironmentIsVetoed() {
+        let input = "\\documentclass{article}\n\\begin{document}\n\\begin{tabular}{c}\\multicolumn{1}\nc\n%% === Page 2 ===\nc\n\\end{tabular}\n\\end{document}"
+        let normalizer = LaTeXNormalizer()
+        XCTAssertEqual(normalizer.removeCrossPageDuplicates(input), input)
+        let longtable = "\\documentclass{article}\n\\usepackage{longtable}\n\\begin{document}\n\\begin{longtable}{l}\nSame row text here \\\\\n%% === Page 2 ===\nSame row text here \\\\\n\\end{longtable}\n\\end{document}"
+        XCTAssertEqual(normalizer.removeCrossPageDuplicates(longtable), longtable)
+    }
+
+    /// 否決 5 只看邊界那一行：表格已經關閉之後的分頁，重複的正文照樣刪（否決只收窄，不是關掉去重）。
+    func testDedup_proseAfterAClosedTableIsStillDeduplicated() {
+        let input = "\\documentclass{article}\n\\begin{document}\n\\begin{tabular}{c}\nx\n\\end{tabular}\nThe same sentence repeats.\n%% === Page 2 ===\nThe same sentence repeats.\nNext.\n\\end{document}"
+        let expected = "\\documentclass{article}\n\\begin{document}\n\\begin{tabular}{c}\nx\n\\end{tabular}\nThe same sentence repeats.\n%% === Page 2 ===\nNext.\n\\end{document}"
+        XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), expected)
+    }
+
+    /// 對齊環境的 `\begin`／`\end` 配對不一致時，無法判斷任何邊界是否在表格裡，整份不刪。
+    func testDedup_unbalancedAlignmentEnvironmentsBlockAllDeletion() {
+        let input = "\\documentclass{article}\n\\begin{document}\n\\begin{tabular}{c}\nThe same sentence repeats.\n%% === Page 2 ===\nThe same sentence repeats.\n\\end{document}"
+        XCTAssertEqual(LaTeXNormalizer().removeCrossPageDuplicates(input), input)
+    }
+
     /// `\ifcase` 的兩個分支分隔 `\or` 夾著分頁（Codex R4 HIGH）：文字相同卻是不同分支的結構。刪掉第二個
     /// `\or`，分支 2 消失；pdflatex 實測原文輸出 `B`，刪掉之後不輸出。
     func testDedup_conditionalBranchesAreNeverDeleted() {
