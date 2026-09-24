@@ -117,6 +117,22 @@ final class LaTeXFigureWidthTests: XCTestCase {
         XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[\(Self.w68)]{figures/p012-fig.1}")
     }
 
+    /// 明確寫了 TeX 認得的圖檔副檔名（`.pdf`、`.jpg`…）時，TeX 直接用那個檔，不補 `.png`：
+    /// 即使 metadata 有 id 為 `plot.pdf` 的圖，也不配到 `plot.pdf.png`。
+    func testExplicitGraphicsExtensionIsNotTreatedAsAnOmittedPNG() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeResponse("pages-012-013.json", figures: [
+            (12, "plot.pdf", [0.12, 0.08, 0.68, 0.31]),
+            (12, "photo.JPG", [0.12, 0.08, 0.68, 0.31]),
+        ])
+        try writeImage("figures/plot.pdf.png")
+        try writeImage("figures/photo.JPG.png")
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/plot.pdf}\\includegraphics{figures/photo.JPG}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.map(\.outcome), [.noMatchingFigure, .noMatchingFigure])
+    }
+
     func testExtensionlessPathMatchesCroppedPNG() throws {
         try writeSpecExample()
         let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01}")
