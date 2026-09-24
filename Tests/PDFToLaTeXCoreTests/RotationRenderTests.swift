@@ -183,7 +183,15 @@ final class RotationRenderTests: XCTestCase {
     }
 
     /// 迴歸：0°／180° 本來就不需要互換，尺寸與內容位置維持原行為。
+    /// 座標推導（top-left／y 向下）：
+    /// - `rotation=0`：不轉換，content 右上角 x:[260,300) y:[130,150) 直接映成 x:[260,300) y:[0,20)。
+    /// - `rotation=180`：`x'=W-x, y'=H-y`（W=300, H=150，尺寸不互換），代入四角得 x:[0,40) y:[130,150)
+    ///   ——貼著左下角。
     func testRotation0And180StillRenderUnswappedCanvas() throws {
+        let expected: [Int: (x: Range<Int>, y: Range<Int>)] = [
+            0: (260..<300, 0..<20),
+            180: (0..<40, 130..<150),
+        ]
         for rotation in [0, 180] {
             let pdfURL = dir.appendingPathComponent("r\(rotation).pdf")
             try makeMarkedPDF(contentWidth: 300, contentHeight: 150, rotation: rotation, to: pdfURL)
@@ -196,6 +204,9 @@ final class RotationRenderTests: XCTestCase {
             XCTAssertEqual(image.height, 150, "rotation=\(rotation)")
             let box = try XCTUnwrap(redBoundingBox(in: image), "rotation=\(rotation) 標記不見了")
             XCTAssertEqual(box.x.count * box.y.count, 800, "rotation=\(rotation) 標記面積應完整")
+            let (expectedX, expectedY) = try XCTUnwrap(expected[rotation])
+            XCTAssertEqual(box.x, expectedX, "rotation=\(rotation) 標記水平位置與推導不符")
+            XCTAssertEqual(box.y, expectedY, "rotation=\(rotation) 標記垂直位置與推導不符")
         }
     }
 
