@@ -341,6 +341,121 @@ struct LaTeXSourceScan {
         return String(decoding: remaining, as: UTF16.self).contains { $0.isLetter }
     }
 
+    /// 數學環境（封閉列舉）。`aligned`、`split`、`cases`、`array` 等只會出現在數學模式裡，不必列入。
+    static let mathEnvironments: Set<String> = [
+        "math", "displaymath", "equation", "equation*", "eqnarray", "eqnarray*", "align", "align*",
+        "alignat", "alignat*", "flalign", "flalign*", "gather", "gather*", "multline", "multline*",
+    ]
+
+    /// 每一行開頭是否在數學模式裡（PsychQuant/macdoc#215，Codex R6）。只看作用中的程式碼（document
+    /// body、不在巨集定義內、不是註解或 verbatim）。
+    ///
+    /// 數學的開關（封閉列舉）：`$`／`$`；`$$`／`$$`（同一行相鄰的兩個 `$`；正在行內數學中時第一個 `$`
+    /// 先關閉它，與 `linesAreSelfBalanced` 相同）；`\(`／`\)`；`\[`／`\]`；`mathEnvironments` 的
+    /// `\begin`／`\end`。數學裡的 `\text{…$…$…}` 照樣配對。
+    ///
+    /// 配對不一致（關閉一個沒開的、或 body 結束時還開著）時回傳 nil：無法判斷任何一行的模式。
+    func mathModeAtLineStarts() -> [Bool]? {
+        enum MathOpener: Equatable {
+            case inlineDollar, displayDollar, paren, bracket, environment(String)
+        }
+        var stack: [MathOpener] = []
+        var result = [Bool](repeating: false, count: lineStarts.count)
+        var line = 0
+        var k = 0
+        func close(_ opener: MathOpener) -> Bool {
+            guard stack.last == opener else { return false }
+            stack.removeLast()
+            return true
+        }
+        while k < units.count {
+            while line + 1 < lineStarts.count && lineStarts[line + 1] <= k {
+                line += 1
+                result[line] = !stack.isEmpty
+            }
+            guard isActive(k) else {
+                k += 1
+                continue
+            }
+            let unit = units[k]
+            if unit == U.backslash {
+                guard k + 1 < units.count else { break }
+                let next = units[k + 1]
+                if U.isLetter(next) {
+                    var end = k + 1
+                    while end < units.count && U.isLetter(units[end]) { end += 1 }
+                    let name = text((k + 1)..<end)
+                    if name == "begin" || name == "end", let argument = readGroupArgument(from: end) {
+                        let environment = argument.text.trimmingCharacters(in: .whitespaces)
+                        if Self.mathEnvironments.contains(environment) {
+                            if name == "begin" {
+                                stack.append(.environment(environment))
+                            } else if !close(.environment(environment)) {
+                                return nil
+                            }
+                        }
+                        k = argument.range.upperBound
+                        continue
+                    }
+                    k = end
+                    continue
+                }
+                switch next {
+                case U.openParen: stack.append(.paren)
+                case U.closeParen: if !close(.paren) { return nil }
+                case U.openBracket: stack.append(.bracket)
+                case U.closeBracket: if !close(.bracket) { return nil }
+                default: break
+                }
+                k += 2
+                continue
+            }
+            if unit == U.dollar {
+                if stack.last == .inlineDollar {
+                    stack.removeLast()
+                } else if k + 1 < units.count && units[k + 1] == U.dollar && isActive(k + 1) {
+                    if stack.last == .displayDollar {
+                        stack.removeLast()
+                    } else {
+                        stack.append(.displayDollar)
+                    }
+                    k += 2
+                    continue
+                } else {
+                    stack.append(.inlineDollar)
+                }
+            }
+            k += 1
+        }
+        while line + 1 < lineStarts.count {
+            line += 1
+            result[line] = !stack.isEmpty
+        }
+        return stack.isEmpty ? result : nil
+    }
+
+    /// 這一行的程式碼（去掉註解與行尾空白）是否以控制序列結尾：控制字（`\emph`）、控制符號（`\\`、`\%`），
+    /// 或單獨的 `\`（和換行組成控制空白）。這一行沒有程式碼時回傳 nil。以控制序列結尾的地方，後面的
+    /// token 可能被它當成參數讀走（PsychQuant/macdoc#215，Codex R6）。
+    func lineEndsWithControlSequence(_ line: Int) -> Bool? {
+        let range = lineRange(line)
+        var last = range.upperBound - 1
+        while last >= range.lowerBound && (kinds[last] != .code || U.isWhitespace(units[last])) {
+            last -= 1
+        }
+        guard last >= range.lowerBound else { return nil }
+        if units[last] == U.backslash { return true }
+        var slashes = 0
+        var p = last - 1
+        while p >= range.lowerBound && units[p] == U.backslash && kinds[p] == .code {
+            slashes += 1
+            p -= 1
+        }
+        if slashes % 2 == 1 { return true }  // 控制符號，例如 \%、\,
+        guard U.isLetter(units[last]) else { return false }
+        return controlWords.contains { $0.end == last + 1 && $0.start >= range.lowerBound }
+    }
+
     /// 與條件式相關、名稱不以 `if` 開頭的控制字（封閉列舉）。見 `linesAreSelfBalanced`。
     static let conditionalWords: Set<String> = ["or", "else", "fi", "unless", "loop", "repeat"]
 
