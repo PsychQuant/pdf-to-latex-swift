@@ -339,6 +339,214 @@ final class LaTeXFigureWidthTests: XCTestCase {
         XCTAssertEqual(report.resolutions.first?.line, 4)
     }
 
+    // MARK: - Inactive regions (verbatim / \verb / definitions / after \end{document})
+
+    func testVerbatimLikeRegionsAreNeverRewrittenAndTheirMarkersDoNotCount() throws {
+        try writeManifest(pages: [(12, 612), (99, 612)])
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.12, 0.08, 0.68, 0.31])])
+        // 若 verbatim 裡的假 marker 被採信，下方真正的圖會拿到第 99 頁的 0.2。
+        try writeResponse("pages-099-100.json", figures: [(99, "p012-fig01", [0.1, 0.1, 0.2, 0.2])])
+        try writeImage("figures/p012-fig01.png")
+        let environments: [(begin: String, end: String)] = [
+            ("\\begin{verbatim}", "\\end{verbatim}"),
+            ("\\begin{verbatim*}", "\\end{verbatim*}"),
+            ("\\begin{Verbatim}", "\\end{Verbatim}"),
+            ("\\begin{lstlisting}[language=TeX]", "\\end{lstlisting}"),
+            ("\\begin{minted}{latex}", "\\end{minted}"),
+            ("\\begin{comment}", "\\end{comment}"),
+        ]
+        for env in environments {
+            let block = """
+            \(env.begin)
+            %% === Page 99 ===
+            \\chapter{Fake}
+            \\includegraphics{figures/p012-fig01.png}
+            \(env.end)
+            """
+            let source = """
+            %% === Page 12 ===
+            Intro.
+            \(block)
+            \\includegraphics{figures/p012-fig01.png}
+            """
+            let report = apply(source)
+            XCTAssertTrue(report.result.contains(block), env.begin)
+            XCTAssertTrue(report.result.hasSuffix(
+                "\(env.end)\n\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}"
+            ), env.begin)
+            XCTAssertEqual(report.resolutions.map(\.page), [12], env.begin)
+        }
+    }
+
+    func testInlineVerbIsNeverRewritten_percentInsideVerbIsNotAComment() throws {
+        try writeSpecExample()
+        let source = """
+        %% === Page 12 ===
+        \\verb|\\includegraphics{figures/p012-fig01.png}| and \\verb*!\\includegraphics{figures/p012-fig01.png}!
+        \\verb|%| \\includegraphics{figures/p012-fig01.png}
+        """
+        let report = apply(source)
+        XCTAssertEqual(report.result, source.replacingOccurrences(
+            of: "\\verb|%| \\includegraphics{", with: "\\verb|%| \\includegraphics[width=0.68\\textwidth]{"
+        ))
+        XCTAssertEqual(report.resolutions.map(\.line), [3])
+    }
+
+    func testCallsInsideMacroDefinitionsAreNeverRewritten() throws {
+        try writeSpecExample()
+        let source = """
+        %% === Page 12 ===
+        \\newcommand{\\figA}{\\includegraphics{figures/p012-fig01.png}}
+        \\def\\figB{\\includegraphics{figures/p012-fig01.png}}
+        """
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions, [])
+    }
+
+    func testCallsAfterEndDocumentAreNeverRewritten() throws {
+        try writeSpecExample()
+        let source = """
+        \\begin{document}
+        %% === Page 12 ===
+        Text.
+        \\end{document}
+        \\includegraphics{figures/p012-fig01.png}
+        """
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions, [])
+    }
+
+    // MARK: - Comments inside includegraphics arguments
+
+    func testSizeKeyAfterCommentLineIsRecognized() throws {
+        try writeSpecExample()
+        let source = "%% === Page 12 ===\n\\includegraphics[angle=90,% note\nwidth=3cm]{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.first?.outcome, .explicitSizePreserved)
+    }
+
+    func testSizeKeyInsideCommentIsNotASizeKey() throws {
+        try writeSpecExample()
+        let source = "%% === Page 12 ===\n\\includegraphics[angle=90,% width=3cm\n]{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(
+            report.result,
+            "%% === Page 12 ===\n\\includegraphics[angle=90,width=0.68\\textwidth% width=3cm\n]{figures/p012-fig01.png}"
+        )
+    }
+
+    /// width 絕不能落在同一行的 `%` 之後（否則會被註解掉）。
+    func testWidthIsNeverAppendedAfterACommentOnTheSameLine() throws {
+        try writeSpecExample()
+        let cases: [(String, String)] = [
+            ("[clip % note\n]", "[clip,width=0.68\\textwidth % note\n]"),
+            ("[clip % ] not the end\n]", "[clip,width=0.68\\textwidth % ] not the end\n]"),
+            ("[% only a comment\n]", "[width=0.68\\textwidth% only a comment\n]"),
+            ("[clip,% note\n]", "[clip,width=0.68\\textwidth% note\n]"),
+        ]
+        for (options, expected) in cases {
+            let source = "%% === Page 12 ===\n\\includegraphics\(options){figures/p012-fig01.png}"
+            let report = apply(source)
+            XCTAssertEqual(
+                report.result,
+                "%% === Page 12 ===\n\\includegraphics\(expected){figures/p012-fig01.png}",
+                options
+            )
+            for line in report.result.components(separatedBy: "\n") {
+                if let percent = line.firstIndex(of: "%"), let width = line.range(of: "width=0.68") {
+                    XCTAssertLessThan(width.lowerBound, percent, "width after a comment in: \(line)")
+                }
+            }
+        }
+    }
+
+    func testCommentBetweenCommandAndPathGetsBracketsBeforeTheComment() throws {
+        try writeSpecExample()
+        let source = "%% === Page 12 ===\n\\includegraphics% note\n{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[width=0.68\\textwidth]% note\n{figures/p012-fig01.png}")
+    }
+
+    // MARK: - Option values with braces and commas
+
+    func testNestedBracesAndCommasInsideValues() throws {
+        try writeSpecExample()
+        let cases: [(String, String)] = [
+            ("[angle=90, trim={1, 2, 3, 4}, viewport={0 {0} 10 10}, clip]",
+             "[angle=90, trim={1, 2, 3, 4}, viewport={0 {0} 10 10}, clip,width=0.68\\textwidth]"),
+            ("[alt={width=3cm}]", "[alt={width=3cm},width=0.68\\textwidth]"),
+            ("[alt={a]b}, clip]", "[alt={a]b}, clip,width=0.68\\textwidth]"),
+        ]
+        for (options, expected) in cases {
+            let source = "%% === Page 12 ===\n\\includegraphics\(options){figures/p012-fig01.png}"
+            XCTAssertEqual(
+                apply(source).result,
+                "%% === Page 12 ===\n\\includegraphics\(expected){figures/p012-fig01.png}",
+                options
+            )
+        }
+    }
+
+    func testStarredFormWithOptions() throws {
+        try writeSpecExample()
+        let report = apply("%% === Page 12 ===\n\\includegraphics*[clip]{figures/p012-fig01.png}")
+        XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics*[clip,width=0.68\\textwidth]{figures/p012-fig01.png}")
+    }
+
+    func testMultipleCallsOnOneLine() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeResponse("pages-012-013.json", figures: [
+            (12, "p012-fig01", [0.05, 0.1, 0.45, 0.3]),
+            (12, "p012-fig02", [0.5, 0.1, 0.4, 0.3]),
+        ])
+        try writeImage("figures/p012-fig01.png")
+        try writeImage("figures/p012-fig02.png")
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}\\hfill\\includegraphics[angle=90]{figures/p012-fig02.png}"
+        let report = apply(source)
+        XCTAssertEqual(
+            report.result,
+            "%% === Page 12 ===\n\\includegraphics[width=0.45\\textwidth]{figures/p012-fig01.png}\\hfill\\includegraphics[angle=90,width=0.4\\textwidth]{figures/p012-fig02.png}"
+        )
+        XCTAssertEqual(report.resolutions.map(\.line), [2, 2])
+    }
+
+    // MARK: - Width formatting
+
+    func testSmallWidthsKeepSignificantDigitsAndReportWhatIsWritten() throws {
+        try writeManifest(pages: [(12, 600)])
+        try writeImage("figures/p012-fig01.png")
+        let cases: [(bboxWidth: Double, written: String)] = [
+            (0.0000123, "0.000012"),
+            (0.1234567, "0.123457"),
+            (0.5, "0.5"),
+            (1.0, "1"),
+        ]
+        for (bboxWidth, written) in cases {
+            try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0, 0.1, bboxWidth, 0.2])])
+            let report = apply("%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}")
+            XCTAssertEqual(report.result, "%% === Page 12 ===\n\\includegraphics[width=\(written)\\textwidth]{figures/p012-fig01.png}")
+            guard case let .widthApplied(fraction, widthPoints) = report.resolutions.first?.outcome else {
+                XCTFail("expected widthApplied for \(bboxWidth)")
+                continue
+            }
+            XCTAssertEqual(fraction, Double(written))
+            XCTAssertEqual(widthPoints, Double(written)! * 600, accuracy: 1e-9)
+        }
+    }
+
+    func testWidthThatWouldRoundToZeroIsLeftUnchangedAndReported() throws {
+        try writeManifest(pages: [(12, 612)])
+        try writeImage("figures/p012-fig01.png")
+        try writeResponse("pages-012-013.json", figures: [(12, "p012-fig01", [0.1, 0.1, 4e-7, 0.2])])
+        let source = "%% === Page 12 ===\n\\includegraphics{figures/p012-fig01.png}"
+        let report = apply(source)
+        XCTAssertEqual(report.result, source)
+        XCTAssertEqual(report.resolutions.first?.outcome, .widthNotRepresentable(4e-7))
+    }
+
     // MARK: - Idempotency
 
     func testSecondRunChangesNothing() throws {
@@ -405,5 +613,42 @@ final class LaTeXFigureWidthTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: mainURL, encoding: .utf8), first)
         XCTAssertEqual(report2.figureWidthResolutions.map(\.outcome),
                        [.explicitSizePreserved, .noMatchingFigure])
+    }
+
+    /// stripPageMarkers 模式：第一輪在移除 marker 之前完成配對；第二輪 marker 已不在，
+    /// 已改寫者落入 explicitSizePreserved，未解決者回報 noPageContext（頁面連結已隨 marker
+    /// 移除），原始碼位元組不變。
+    func testNormalizeProject_stripPageMarkers_secondRunIsByteIdentical() throws {
+        try writeSpecExample()
+        let mainURL = projectDir.appendingPathComponent("accumulated.tex")
+        try """
+        \\documentclass{book}
+        \\usepackage{graphicx}
+        \\begin{document}
+
+        %% === Page 12 ===
+        \\begin{verbatim}
+        %% === Page 99 ===
+        \\includegraphics{figures/p012-fig01.png}
+        \\end{verbatim}
+        \\includegraphics{figures/p012-fig01.png}
+        \\includegraphics{figures/p012-fig09.png}
+
+        \\end{document}
+        """.write(to: mainURL, atomically: true, encoding: .utf8)
+
+        let normalizer = LaTeXNormalizer(stripPageMarkers: true)
+        let report1 = try normalizer.normalizeProject(mainTexURL: mainURL)
+        let first = try String(contentsOf: mainURL, encoding: .utf8)
+        XCTAssertFalse(first.contains("%% === Page 12 ==="))
+        XCTAssertTrue(first.contains("\\begin{verbatim}\n%% === Page 99 ===\n\\includegraphics{figures/p012-fig01.png}\n\\end{verbatim}"))
+        XCTAssertTrue(first.contains("\\end{verbatim}\n\\includegraphics[width=0.68\\textwidth]{figures/p012-fig01.png}"))
+        XCTAssertEqual(report1.figureWidthResolutions.map(\.outcome).count, 2)
+        XCTAssertEqual(report1.figureWidthResolutions.last?.outcome, .noMatchingFigure)
+
+        let report2 = try normalizer.normalizeProject(mainTexURL: mainURL)
+        XCTAssertFalse(report2.mainFileChanged)
+        XCTAssertEqual(try String(contentsOf: mainURL, encoding: .utf8), first)
+        XCTAssertEqual(report2.figureWidthResolutions.map(\.outcome), [.explicitSizePreserved, .noPageContext])
     }
 }

@@ -6,12 +6,13 @@ import Foundation
 public struct FigureWidthResolution: Sendable, Equatable {
     /// 處理結果（封閉列舉）。除 `widthApplied` 外，原始碼一律保持原樣。
     public enum Outcome: Sendable, Equatable {
-        /// 已寫入 `width=<fraction>\textwidth`。`fraction` 是 bbox 的寬（頁寬比例），
+        /// 已寫入 `width=<fraction>\textwidth`。`fraction` 就是寫進原始碼的數值；
         /// `widthPoints` = `fraction` × manifest 頁寬（pt），供稽核原書上的實際寬度。
         case widthApplied(fraction: Double, widthPoints: Double)
         /// 選項已含明確尺寸 key（`width`／`height`／`totalheight`／`scale`），原樣保留。
         case explicitSizePreserved
-        /// 呼叫之前沒有 `%% === Page N ===` 標記，無法決定屬於哪一頁。
+        /// 呼叫之前沒有作用中的 `%% === Page N ===`，無法決定屬於哪一頁。
+        /// 以 `stripPageMarkers` 跑過一輪之後，marker 已被移除，未解決的圖在之後的輪次都會落在這裡。
         case noPageContext
         /// 該頁的 responses 沒有這個路徑的 figure。
         case noMatchingFigure
@@ -19,6 +20,8 @@ public struct FigureWidthResolution: Sendable, Equatable {
         case ambiguousFigure
         /// bbox 不是合法的正規化 `[x, y, w, h]`。
         case invalidBoundingBox([Double])
+        /// bbox 寬度以六位小數表示會變成 0：不寫入，附原值。
+        case widthNotRepresentable(Double)
         /// manifest.json 沒有該頁的 `PageRecord`，或頁寬不是正的有限值。
         case missingPageRecord
         /// 裁切圖檔（`figures/<id>.png`）不存在。
@@ -46,7 +49,7 @@ public struct FigureWidthResolution: Sendable, Equatable {
 /// `applyFigureWidths` 的結果：改寫後的原始碼與逐一的處理結果。
 public struct FigureWidthReport: Sendable, Equatable {
     public let result: String
-    /// 每個 `\includegraphics{figures/...}`（註解內的除外）一筆，依出現順序。
+    /// 每個作用中的 `\includegraphics{figures/...}` 一筆，依出現順序。
     public let resolutions: [FigureWidthResolution]
     /// 讀不到或無法解碼的 `responses/*.json`（相對於專案目錄）。metadata 只在有呼叫需要查詢時
     /// 才讀取；所有呼叫都已帶明確尺寸時不讀，此欄為空。
@@ -68,66 +71,76 @@ extension LaTeXNormalizer {
     /// 依 AI 回傳的 `FigureRegion.bbox` 還原圖片寬度：`\includegraphics{figures/…}` →
     /// `\includegraphics[width=<bbox 寬>\textwidth]{figures/…}`（bbox 寬 0.68 → `0.68\textwidth`）。
     ///
+    /// ## 對象
+    ///
+    /// 作用中（`LaTeXSourceScan`：不在註解、verbatim 類環境、`\verb`、巨集定義內，且位於 document
+    /// body）且路徑（去掉註解、前後空白與開頭 `./`）以 `figures/` 開頭的呼叫。其他呼叫一律不動、
+    /// 不回報。`*`、`[選項]`、`{路徑}` 之間可以有空白、換行與註解；同一行可以有多個呼叫。
+    ///
     /// ## 配對
     ///
-    /// 對象是路徑（去掉前後空白與開頭 `./`）以 `figures/` 開頭、且不在註解內的呼叫。
-    /// 頁碼取呼叫之前最近的 `%% === Page N ===`。metadata 以（頁碼, 完整相對路徑）為 key：
+    /// 頁碼取呼叫之前最近的作用中 page marker。metadata 以（頁碼, 完整相對路徑）為 key：
     /// `responses/*.json` 中第 N 頁的 figure `id` 對應路徑 `figures/<id>.png`（裁切圖的實際檔名）；
     /// 原始碼路徑必須與它完全相同，或是省略 `.png` 的同一路徑。不做子字串比對，也不跨頁借用
     /// 同名 figure 的 bbox。
     ///
     /// ## 既有選項的合併規則
     ///
-    /// - 選項已含 `explicitSizeOptionKeys` 任一 key → 整個呼叫逐位元組保留，
-    ///   回報 `explicitSizePreserved`（使用者寫的尺寸優先，即使與 bbox 不符）。
-    /// - 否則把 `width=<w>\textwidth` 加在選項**最後**，其餘選項原文、原順序保留；
-    ///   沒有 `[...]` 時在指令名稱（含 `*`）之後建立。放最後是因為 graphicx 依序處理 key：
-    ///   先列出的 `angle`／`trim` 先生效，width 約束的是最後顯示出來的框，正好對應在頁面上量到的 bbox。
-    /// - `<w>` 最多四位小數、去掉尾端的 0。
+    /// - 選項 key 由去掉註解後的文字、以大括號外的逗號切分而得（`trim={1, 2, 3, 4}` 是一個選項）。
+    ///   含 `explicitSizeOptionKeys` 任一 key → 整個呼叫逐位元組保留，回報 `explicitSizePreserved`
+    ///   （使用者寫的尺寸優先，即使與 bbox 不符）。寫在註解裡的 `width=` 不算。
+    /// - 否則把 `width=<w>\textwidth` 加在選項**最後一個程式碼字元之後**（必要時先補逗號），
+    ///   其餘選項與註解原文、原順序保留。插入點永遠在同一行的 `%` 之前，所以不會被註解掉；
+    ///   選項裡沒有程式碼時插在 `[` 之後；沒有 `[...]` 時在指令名稱（含 `*`）之後建立。
+    ///   放最後是因為 graphicx 依序處理 key：先列出的 `angle`／`trim` 先生效，width 約束的是最後
+    ///   顯示出來的框，正好對應在頁面上量到的 bbox。
+    /// - `<w>` 為最多六位小數、去掉尾端 0 的 bbox 寬；回報的 `fraction` 就是寫入的數值。
     ///
     /// ## 不改寫、只回報（沒有任何 fallback 比例）
     ///
     /// 依序檢查，第一個不成立者即為結果：metadata 可讀（`metadataUnavailable`）→ 有 page
     /// marker（`noPageContext`）→ 有對應 figure（`noMatchingFigure`）→ bbox 唯一
     /// （`ambiguousFigure`）→ bbox 合法（`invalidBoundingBox`：必須恰好 4 個有限值，
-    /// `x ≥ 0`、`y ≥ 0`、`w > 0`、`h > 0`、`x + w ≤ 1`、`y + h ≤ 1`，容差 1e-6）→ manifest 有該頁
-    /// （`missingPageRecord`）→ 裁切圖檔存在（`missingImageFile`）。
+    /// `x ≥ 0`、`y ≥ 0`、`w > 0`、`h > 0`、`x + w ≤ 1`、`y + h ≤ 1`，容差 1e-6）→ 寬度以六位小數
+    /// 表示不為 0（`widthNotRepresentable`）→ manifest 有該頁（`missingPageRecord`）→ 裁切圖檔
+    /// 存在（`missingImageFile`）。
     ///
     /// ## 冪等
     ///
-    /// 改寫後的呼叫帶有 `width`，重跑時落入 `explicitSizePreserved`；未改寫者重跑得到相同結果。
+    /// 改寫後的呼叫帶有 `width`，重跑時落入 `explicitSizePreserved`；未改寫者重跑得到相同結果，
+    /// 唯一例外是 marker 已被移除（`stripPageMarkers`）時，未解決者改回報 `noPageContext`；
+    /// 兩種情況原始碼都不變。
     public static func applyFigureWidths(_ source: String, projectDir: URL) -> FigureWidthReport {
-        let calls = findFigureIncludeGraphics(in: source)
+        let scan = LaTeXSourceScan(source)
+        let calls = findFigureIncludeGraphics(in: scan)
         guard !calls.isEmpty else {
             return FigureWidthReport(result: source, resolutions: [], unreadableResponseFiles: [])
         }
 
-        let markers = pageMarkerOffsets(in: source)
         var metadata: Result<FigureMetadata, FigureMetadataError>?
         var resolutions: [FigureWidthResolution] = []
         var edits: [(range: Range<Int>, text: String)] = []
 
         for call in calls {
-            let page = markers.last(where: { $0.offset < call.start })?.page
-            let outcome: FigureWidthResolution.Outcome
+            let page = scan.pageMarkers.last(where: { $0.offset < call.start })?.page
+            var outcome = FigureWidthResolution.Outcome.explicitSizePreserved
+            var widthText: String?
 
-            if call.hasExplicitSize {
-                outcome = .explicitSizePreserved
-            } else {
+            if !call.hasExplicitSize {
                 let loadedOnce = metadata ?? loadFigureMetadata(projectDir: projectDir)
                 metadata = loadedOnce
                 switch loadedOnce {
                 case .failure(let error):
                     outcome = .metadataUnavailable(error.reason)
                 case .success(let loaded):
-                    outcome = resolveFigureWidth(
+                    (outcome, widthText) = resolveFigureWidth(
                         path: call.normalizedPath, page: page, metadata: loaded, projectDir: projectDir
                     )
                 }
             }
 
-            if case let .widthApplied(fraction, _) = outcome {
-                edits.append(call.widthEdit(width: "width=\(formatWidthFraction(fraction))\\textwidth"))
+            if let widthText {
+                edits.append(call.widthEdit(width: "width=\(widthText)\\textwidth"))
             }
             resolutions.append(FigureWidthResolution(
                 path: call.path, page: page, line: call.line, outcome: outcome
@@ -139,7 +152,7 @@ extension LaTeXNormalizer {
             return FigureWidthReport(result: source, resolutions: resolutions, unreadableResponseFiles: unreadable)
         }
 
-        var units = Array(source.utf16)
+        var units = scan.units
         for edit in edits.sorted(by: { $0.range.lowerBound > $1.range.lowerBound }) {
             units.replaceSubrange(edit.range, with: Array(edit.text.utf16))
         }
@@ -159,10 +172,11 @@ extension LaTeXNormalizer {
 
     // MARK: - Resolution
 
+    /// 回傳結果與要寫入的寬度文字（只有 `widthApplied` 時非 nil）。
     private static func resolveFigureWidth(
         path: String, page: Int?, metadata: FigureMetadata, projectDir: URL
-    ) -> FigureWidthResolution.Outcome {
-        guard let page else { return .noPageContext }
+    ) -> (FigureWidthResolution.Outcome, String?) {
+        guard let page else { return (.noPageContext, nil) }
 
         var candidates = [path]
         if (path as NSString).pathExtension.isEmpty {
@@ -171,23 +185,26 @@ extension LaTeXNormalizer {
         guard let (canonicalPath, boxes) = candidates.lazy.compactMap({ candidate in
             metadata.figures[FigureKey(page: page, path: candidate)].map { (candidate, $0) }
         }).first else {
-            return .noMatchingFigure
+            return (.noMatchingFigure, nil)
         }
 
         var distinct: [[Double]] = []
         for box in boxes where !distinct.contains(box) {
             distinct.append(box)
         }
-        guard distinct.count == 1, let bbox = distinct.first else { return .ambiguousFigure }
-        guard isValidNormalizedBBox(bbox) else { return .invalidBoundingBox(bbox) }
+        guard distinct.count == 1, let bbox = distinct.first else { return (.ambiguousFigure, nil) }
+        guard isValidNormalizedBBox(bbox) else { return (.invalidBoundingBox(bbox), nil) }
+        guard let widthText = formatWidthFraction(bbox[2]), let written = Double(widthText) else {
+            return (.widthNotRepresentable(bbox[2]), nil)
+        }
 
         guard let pageWidth = metadata.pageWidths[page], pageWidth.isFinite, pageWidth > 0 else {
-            return .missingPageRecord
+            return (.missingPageRecord, nil)
         }
         let imagePath = projectDir.appendingPathComponent(canonicalPath).path
-        guard FileManager.default.fileExists(atPath: imagePath) else { return .missingImageFile }
+        guard FileManager.default.fileExists(atPath: imagePath) else { return (.missingImageFile, nil) }
 
-        return .widthApplied(fraction: bbox[2], widthPoints: bbox[2] * pageWidth)
+        return (.widthApplied(fraction: written, widthPoints: written * pageWidth), widthText)
     }
 
     static func isValidNormalizedBBox(_ bbox: [Double]) -> Bool {
@@ -198,10 +215,13 @@ extension LaTeXNormalizer {
             && x + w <= 1 + tolerance && y + h <= 1 + tolerance
     }
 
-    static func formatWidthFraction(_ value: Double) -> String {
-        var text = String(format: "%.4f", value)
+    /// 最多六位小數、去掉尾端 0。正值四捨五入後變成 0（或非正、非有限）時回傳 nil。
+    static func formatWidthFraction(_ value: Double) -> String? {
+        guard value.isFinite, value > 0 else { return nil }
+        var text = String(format: "%.6f", value)
         while text.hasSuffix("0") { text.removeLast() }
         if text.hasSuffix(".") { text.removeLast() }
+        guard let parsed = Double(text), parsed > 0 else { return nil }
         return text
     }
 
@@ -294,48 +314,45 @@ extension LaTeXNormalizer {
     // MARK: - Source Scanning
 
     struct IncludeGraphicsCall {
+        enum Insertion {
+            /// 沒有 `[...]`：在此插入 `[width=…]`。
+            case newBrackets
+            /// 選項裡沒有程式碼：直接插入 `width=…`。
+            case firstOption
+            /// 最後一個程式碼字元不是逗號：插入 `,width=…`。
+            case appendWithComma
+            /// 最後一個程式碼字元是逗號：插入 `width=…`。
+            case appendAfterComma
+        }
+
         /// `\` 的 UTF-16 offset。
         let start: Int
-        /// 指令名稱（含 `*`）之後的 offset；沒有 `[...]` 時在此插入選項。
-        let nameEnd: Int
-        /// `[` 與 `]` 之間的範圍（UTF-16）；沒有選項時為 nil。
-        let optionsRange: Range<Int>?
-        let options: String?
         /// 大括號內原樣的路徑。
         let path: String
+        /// 去掉註解、前後空白與開頭 `./` 的路徑。
+        let normalizedPath: String
+        /// 1 起算的行號。
         let line: Int
-
-        var normalizedPath: String {
-            var trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-            while trimmed.hasPrefix("./") { trimmed.removeFirst(2) }
-            return trimmed
-        }
-
-        var hasExplicitSize: Bool {
-            guard let options else { return false }
-            return LaTeXNormalizer.optionKeys(options).contains {
-                LaTeXNormalizer.explicitSizeOptionKeys.contains($0)
-            }
-        }
+        let hasExplicitSize: Bool
+        let insertionOffset: Int
+        let insertion: Insertion
 
         func widthEdit(width: String) -> (range: Range<Int>, text: String) {
-            guard let optionsRange, let options else {
-                return (nameEnd..<nameEnd, "[\(width)]")
+            let range = insertionOffset..<insertionOffset
+            switch insertion {
+            case .newBrackets: return (range, "[\(width)]")
+            case .firstOption, .appendAfterComma: return (range, width)
+            case .appendWithComma: return (range, "," + width)
             }
-            var kept = options
-            while let last = kept.last, last.isWhitespace { kept.removeLast() }
-            if kept.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return (optionsRange, width)
-            }
-            return (optionsRange, kept.hasSuffix(",") ? kept + width : kept + "," + width)
         }
     }
 
-    /// 頂層（不在大括號內）逗號分隔的選項 key。
+    /// 去掉註解後的選項文字，以大括號外的逗號切分出的 key。
     static func optionKeys(_ options: String) -> [String] {
         var keys: [String] = []
         var current = ""
         var depth = 0
+        var escaped = false
         func flush() {
             let key = current.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
                 .first.map(String.init) ?? ""
@@ -343,143 +360,87 @@ extension LaTeXNormalizer {
             current = ""
         }
         for ch in options {
-            if ch == "{" { depth += 1 }
-            if ch == "}" { depth -= 1 }
-            if ch == "," && depth == 0 {
-                flush()
-            } else {
+            if escaped {
+                escaped = false
                 current.append(ch)
+                continue
             }
+            switch ch {
+            case "\\":
+                escaped = true
+            case "{":
+                depth += 1
+            case "}":
+                depth -= 1
+            case "," where depth == 0:
+                flush()
+                continue
+            default:
+                break
+            }
+            current.append(ch)
         }
         flush()
         return keys
     }
 
-    /// 以 UTF-16 offset 表示的 page marker（與 NSRegularExpression 一致）。
-    static func pageMarkerOffsets(in source: String) -> [(offset: Int, page: Int)] {
-        let pattern = #"^[ \t]*%%[ \t]*===[ \t]*Page[ \t]+(\d+)[ \t]*==="#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .anchorsMatchLines) else {
-            return []
-        }
-        let ns = source as NSString
-        return regex.matches(in: source, range: NSRange(location: 0, length: ns.length)).compactMap { match in
-            Int(ns.substring(with: match.range(at: 1))).map { (match.range.location, $0) }
-        }
-    }
-
-    /// 找出所有不在註解內、路徑以 `figures/` 開頭的 `\includegraphics` 呼叫。
-    static func findFigureIncludeGraphics(in source: String) -> [IncludeGraphicsCall] {
-        let units = Array(source.utf16)
-        let name = Array("includegraphics".utf16)
-        let backslash = UInt16(UInt8(ascii: "\\"))
-        let percent = UInt16(UInt8(ascii: "%"))
-        let newline = UInt16(UInt8(ascii: "\n"))
-
-        func isLetter(_ unit: UInt16) -> Bool {
-            (unit >= 0x41 && unit <= 0x5A) || (unit >= 0x61 && unit <= 0x7A)
-        }
-
+    /// 所有作用中、路徑以 `figures/` 開頭的 `\includegraphics` 呼叫。
+    static func findFigureIncludeGraphics(in scan: LaTeXSourceScan) -> [IncludeGraphicsCall] {
+        let units = scan.units
         var calls: [IncludeGraphicsCall] = []
-        var line = 1
-        var i = 0
-        while i < units.count {
-            let unit = units[i]
-            if unit == newline {
-                line += 1
-                i += 1
-            } else if unit == percent {
-                while i < units.count && units[i] != newline { i += 1 }
-            } else if unit == backslash {
-                var j = i + 1
-                guard j < units.count else { break }
-                guard isLetter(units[j]) else {
-                    // 控制符號（\%、\\、\{ …）：整組跳過，避免把 \% 當成註解開頭。
-                    if units[j] == newline { line += 1 }
-                    i = j + 1
-                    continue
-                }
-                while j < units.count && isLetter(units[j]) { j += 1 }
-                if Array(units[(i + 1)..<j]) == name,
-                   let (call, end) = parseIncludeGraphics(units, start: i, nameEnd: j, line: line) {
-                    if call.normalizedPath.hasPrefix("figures/") {
-                        calls.append(call)
-                    }
-                    line += units[i..<end].filter { $0 == newline }.count
-                    i = end
+        for word in scan.controlWords where word.name == "includegraphics" && scan.isActive(word.start) {
+            var nameEnd = word.end
+            var k = scan.skipIgnorable(from: word.end)
+            if k < units.count && units[k] == U.star && scan.kinds[k] == .code {
+                nameEnd = k + 1
+                k = scan.skipIgnorable(from: nameEnd)
+            }
+            var optionsRange: Range<Int>?
+            if k < units.count && units[k] == U.openBracket && scan.kinds[k] == .code {
+                guard let end = scan.optionalEnd(from: k) else { continue }
+                optionsRange = (k + 1)..<(end - 1)
+                k = scan.skipIgnorable(from: end)
+            }
+            guard let pathEnd = scan.groupEnd(from: k) else { continue }
+            let pathRange = (k + 1)..<(pathEnd - 1)
+
+            var normalized = scan.codeText(pathRange).trimmingCharacters(in: .whitespacesAndNewlines)
+            while normalized.hasPrefix("./") { normalized.removeFirst(2) }
+            guard normalized.hasPrefix("figures/") else { continue }
+
+            let hasExplicitSize = optionsRange.map {
+                optionKeys(scan.codeText($0)).contains { explicitSizeOptionKeys.contains($0) }
+            } ?? false
+
+            let insertionOffset: Int
+            let insertion: IncludeGraphicsCall.Insertion
+            if let range = optionsRange {
+                if let last = range.reversed().first(where: {
+                    scan.kinds[$0] == .code && !U.isWhitespace(units[$0])
+                }) {
+                    let isSeparator = units[last] == U.comma
+                        && !(last > range.lowerBound && units[last - 1] == U.backslash)
+                    insertionOffset = last + 1
+                    insertion = isSeparator ? .appendAfterComma : .appendWithComma
                 } else {
-                    i = j
+                    insertionOffset = range.lowerBound
+                    insertion = .firstOption
                 }
             } else {
-                i += 1
+                insertionOffset = nameEnd
+                insertion = .newBrackets
             }
+
+            calls.append(IncludeGraphicsCall(
+                start: word.start,
+                path: scan.text(pathRange),
+                normalizedPath: normalized,
+                line: scan.line(of: word.start) + 1,
+                hasExplicitSize: hasExplicitSize,
+                insertionOffset: insertionOffset,
+                insertion: insertion
+            ))
         }
         return calls
-    }
-
-    private static func parseIncludeGraphics(
-        _ units: [UInt16], start: Int, nameEnd: Int, line: Int
-    ) -> (IncludeGraphicsCall, end: Int)? {
-        let backslash = UInt16(UInt8(ascii: "\\"))
-        let openBracket = UInt16(UInt8(ascii: "["))
-        let closeBracket = UInt16(UInt8(ascii: "]"))
-        let openBrace = UInt16(UInt8(ascii: "{"))
-        let closeBrace = UInt16(UInt8(ascii: "}"))
-        let whitespace: Set<UInt16> = [0x20, 0x09, 0x0A, 0x0D]
-
-        var k = nameEnd
-        if k < units.count && units[k] == UInt16(UInt8(ascii: "*")) { k += 1 }
-        let insertionPoint = k
-        while k < units.count && whitespace.contains(units[k]) { k += 1 }
-
-        var optionsRange: Range<Int>?
-        if k < units.count && units[k] == openBracket {
-            let open = k
-            k += 1
-            var depth = 0
-            while k < units.count {
-                let unit = units[k]
-                if unit == backslash {
-                    k += 2
-                    continue
-                }
-                if unit == openBrace { depth += 1 }
-                if unit == closeBrace { depth -= 1 }
-                if unit == closeBracket && depth == 0 { break }
-                k += 1
-            }
-            guard k < units.count else { return nil }
-            optionsRange = (open + 1)..<k
-            k += 1
-            while k < units.count && whitespace.contains(units[k]) { k += 1 }
-        }
-
-        guard k < units.count && units[k] == openBrace else { return nil }
-        let pathOpen = k
-        k += 1
-        var depth = 1
-        while k < units.count {
-            let unit = units[k]
-            if unit == backslash {
-                k += 2
-                continue
-            }
-            if unit == openBrace { depth += 1 }
-            if unit == closeBrace {
-                depth -= 1
-                if depth == 0 { break }
-            }
-            k += 1
-        }
-        guard k < units.count else { return nil }
-
-        let call = IncludeGraphicsCall(
-            start: start,
-            nameEnd: insertionPoint,
-            optionsRange: optionsRange,
-            options: optionsRange.map { String(decoding: units[$0], as: UTF16.self) },
-            path: String(decoding: units[(pathOpen + 1)..<k], as: UTF16.self),
-            line: line
-        )
-        return (call, k + 1)
     }
 }
