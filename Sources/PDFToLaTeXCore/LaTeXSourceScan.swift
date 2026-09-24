@@ -7,9 +7,16 @@ import Foundation
 ///
 /// - **comment**：未跳脫的 `%` 到行尾（`\%` 是字元，不是註解）。
 /// - **verbatim**（封閉列舉，只有這些）：`verbatim`、`verbatim*`、`Verbatim`、`Verbatim*`、
-///   `lstlisting`、`minted`、`comment` 環境的內容（到字面上的 `\end{<env>}` 為止；找不到則到檔尾），
-///   以及 inline `\verb<d>…<d>`、`\verb*<d>…<d>`（到同一行的下一個分隔字元；找不到則到行尾）。
+///   `lstlisting`、`minted`、`comment` 環境的內容（到字面上的 `\end{<env>}` 為止；找不到則到檔尾。
+///   pdflatex 實測：`\end {verbatim}`、`\end%⏎{verbatim}` 都不會結束 verbatim），以及 inline
+///   `\verb`／`\verb*`（分隔字元規則見 `verbEnd`）。
 /// - **code**：其餘。
+///
+/// 環境名稱與 document 邊界的參數用同一個讀取器（`readGroupArgument`）：`\begin`／`\end` 與
+/// `{name}` 之間可以有空白、換行與註解（pdflatex 實測 `\begin% c⏎{verbatim}` 會開始 verbatim）。
+///
+/// 程式碼視圖（`texCodeText`）依 TeX 的註解語意：`%` 到行尾，連同換行與下一行開頭的空白一起
+/// 消失（pdflatex 實測 `[wid%⏎    th=3cm]` 的 key 是 width）；沒有註解的換行是一個空白。
 ///
 /// 巨集定義內的內容不會在定義處執行。定義指令（封閉列舉）：`\newcommand`、`\renewcommand`、
 /// `\providecommand`、`\DeclareRobustCommand`、`\def`、`\gdef`、`\edef`、`\xdef`、`\let`、
@@ -20,8 +27,10 @@ import Foundation
 /// **作用中** = code、不在巨集定義內、位於 document body（`\begin{document}` 之後到
 /// `\end{document}` 之前；沒有 `\begin{document}` 時整份都是 body）。
 ///
-/// **page marker** = 位於 body、不在巨集定義內的一行，其第一個非空白字元（空格／tab 之後）是 comment 的起點，
-/// 且符合 `%% === Page N ===`。verbatim 內長得像 marker 的文字不算。
+/// **page marker 行** = 整行恰好是 `%% === Page N ===`（前後只允許空格／tab，CRLF 的 `\r` 亦可），
+/// 且那個 `%` 是註解起點、不在巨集定義內。後面接其他文字（`%% === Page 12 === 說明`）或位於其他
+/// 註解中間（`% 例：%% === Page 12 ===`）都不是 marker。`pageMarkers` 只收 body 內的；
+/// `markerLines` 不限 body，供移除 marker 用。
 struct LaTeXSourceScan {
     enum Kind: UInt8 {
         case code
@@ -54,8 +63,10 @@ struct LaTeXSourceScan {
     /// code 中的控制字（依出現順序；verbatim 與註解內的不在此列）。
     let controlWords: [ControlWord]
     let body: Range<Int>
-    /// 所有作用中的 page marker（依 offset 排序）。
+    /// body 內的 page marker（依 offset 排序）。
     let pageMarkers: [PageMarker]
+    /// 所有 page marker 行（0 起算，不限 body），供移除 marker 用。
+    let markerLines: [Int]
     private let definitionMask: [Bool]
 
     init(_ source: String) {
@@ -69,20 +80,24 @@ struct LaTeXSourceScan {
         let body = Self.documentBody(units: units, words: words, mask: mask)
 
         var markers: [PageMarker] = []
-        let regex = try! NSRegularExpression(pattern: #"^%%[ \t]*===[ \t]*Page[ \t]+(\d+)[ \t]*==="#)
+        var markerLines: [Int] = []
+        let regex = try! NSRegularExpression(
+            pattern: #"^[ \t]*%%[ \t]*===[ \t]*Page[ \t]+(\d+)[ \t]*===[ \t]*\r?$"#
+        )
         for (line, start) in starts.enumerated() {
             var p = start
             while p < units.count && (units[p] == U.space || units[p] == U.tab) { p += 1 }
-            guard p < units.count, units[p] == U.percent, kinds[p] == .comment, !mask[p], body.contains(p) else {
-                continue
-            }
+            guard p < units.count, units[p] == U.percent, kinds[p] == .comment, !mask[p] else { continue }
             var end = p
             while end < units.count && units[end] != U.newline { end += 1 }
-            let text = String(decoding: units[p..<end], as: UTF16.self)
+            let text = String(decoding: units[start..<end], as: UTF16.self)
             let ns = text as NSString
             guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
                   let page = Int(ns.substring(with: match.range(at: 1))) else { continue }
-            markers.append(PageMarker(offset: p, line: line, page: page))
+            markerLines.append(line)
+            if body.contains(p) {
+                markers.append(PageMarker(offset: p, line: line, page: page))
+            }
         }
 
         self.units = units
@@ -92,6 +107,7 @@ struct LaTeXSourceScan {
         self.definitionMask = mask
         self.body = body
         self.pageMarkers = markers
+        self.markerLines = markerLines
     }
 
     // MARK: - Queries
@@ -99,11 +115,6 @@ struct LaTeXSourceScan {
     func isActive(_ offset: Int) -> Bool {
         offset >= 0 && offset < units.count
             && kinds[offset] == .code && !definitionMask[offset] && body.contains(offset)
-    }
-
-    /// 註解（非 verbatim）且不在巨集定義內。
-    func isComment(_ offset: Int) -> Bool {
-        offset >= 0 && offset < units.count && kinds[offset] == .comment && !definitionMask[offset]
     }
 
     func isExecuted(_ offset: Int) -> Bool {
@@ -138,6 +149,52 @@ struct LaTeXSourceScan {
     /// 範圍內只保留 code 的文字（去掉註解與 verbatim）。
     func codeText(_ range: Range<Int>) -> String {
         String(decoding: range.filter { kinds[$0] == .code }.map { units[$0] }, as: UTF16.self)
+    }
+
+    /// 依 TeX 語意的程式碼文字：去掉 verbatim；註解（`%` 到行尾）連同換行與下一行開頭的
+    /// 空格／tab 一起消失；其他換行（含 CRLF）變成一個空白並略過下一行開頭的空格／tab。
+    func texCodeText(_ range: Range<Int>) -> String {
+        var out: [UInt16] = []
+        var k = range.lowerBound
+        let upper = range.upperBound
+        func skipLeadingBlanks() {
+            while k < upper && (units[k] == U.space || units[k] == U.tab) { k += 1 }
+        }
+        while k < upper {
+            switch kinds[k] {
+            case .verbatim:
+                k += 1
+            case .comment:
+                while k < upper && kinds[k] == .comment { k += 1 }
+                if k < upper && units[k] == U.newline {
+                    k += 1
+                    skipLeadingBlanks()
+                }
+            case .code:
+                let unit = units[k]
+                if unit == U.carriageReturn && k + 1 < upper && units[k + 1] == U.newline {
+                    k += 1
+                } else if unit == U.newline {
+                    out.append(U.space)
+                    k += 1
+                    skipLeadingBlanks()
+                } else {
+                    out.append(unit)
+                    k += 1
+                }
+            }
+        }
+        return String(decoding: out, as: UTF16.self)
+    }
+
+    /// 檔案使用的換行：第一個換行前是 `\r` 就是 CRLF，否則 LF。
+    var lineEnding: String {
+        guard let first = units.firstIndex(of: U.newline) else { return "\n" }
+        return (first > 0 && units[first - 1] == U.carriageReturn) ? "\r\n" : "\n"
+    }
+
+    func readGroupArgument(from offset: Int) -> GroupArgument? {
+        Self.readGroupArgument(units, from: offset)
     }
 
     func text(_ range: Range<Int>) -> String {
@@ -259,11 +316,15 @@ struct LaTeXSourceScan {
             }
             words.append(ControlWord(name: name, start: i, end: j))
 
-            if name == "begin", let (argEnd, env) = environmentName(units, after: j),
-               verbatimEnvironments.contains(env) {
-                let terminator = Array("\\end{\(env)}".utf16)
-                let close = find(terminator, in: units, from: argEnd) ?? n
-                for k in argEnd..<close { kinds[k] = .verbatim }
+            if name == "begin", let argument = readGroupArgument(units, from: j),
+               verbatimEnvironments.contains(argument.text) {
+                for comment in argument.comments {
+                    for k in comment { kinds[k] = .comment }
+                }
+                let contentStart = argument.range.upperBound
+                let terminator = Array("\\end{\(argument.text)}".utf16)
+                let close = find(terminator, in: units, from: contentStart) ?? n
+                for k in contentStart..<close { kinds[k] = .verbatim }
                 i = close
                 continue
             }
@@ -272,28 +333,119 @@ struct LaTeXSourceScan {
         return (kinds, words)
     }
 
-    /// `\verb` 名稱之後：可選 `*`、分隔字元、內容、同一個分隔字元。回傳結尾 offset。
+    /// `\verb` 名稱之後的 verbatim 範圍結尾。規則以 pdflatex（TeX Live 2025）實測決定，對應
+    /// kernel 的 `\verb`／`\@sverb`（`\dospecials` 先把空格改成 other，再用 `\@ifstar` 看星號；
+    /// `\@sverb` 略過字元碼 32 的 token；`\obeylines` 讓行尾也能當分隔字元）：
+    ///
+    /// 1. 名稱之後的 tab 被略過；接著緊鄰的 `*` 才是星號形式。空格之後的 `*` 不是星號形式，
+    ///    而是分隔字元（`\verb *x*` 的內容是 `x`）。
+    /// 2. 再略過任意空格與 tab。
+    /// 3. 下一個字元若是行尾（LF 或 CRLF），分隔字元就是行尾：內容是下一整行（含開頭空白）。
+    /// 4. 否則下一個字元（字母、`%`、`{`、`\\` 都可以）就是分隔字元，內容到同一行的下一個相同
+    ///    字元；行尾先到時 LaTeX 報「\verb ended by end of line」並在行尾結束，這裡也到行尾為止。
+    ///
+    /// 名稱之後緊接字母的情形（`\verbX`）在讀控制字時就成了另一個控制字，不會進到這裡。
     private static func verbEnd(_ units: [UInt16], after offset: Int) -> Int? {
+        let n = units.count
+        func isLineEnd(_ k: Int) -> Bool {
+            units[k] == U.newline || (units[k] == U.carriageReturn && k + 1 < n && units[k + 1] == U.newline)
+        }
         var k = offset
-        if k < units.count && units[k] == U.star { k += 1 }
-        while k < units.count && (units[k] == U.space || units[k] == U.tab) { k += 1 }
-        guard k < units.count, !U.isLetter(units[k]), units[k] != U.newline else { return nil }
+        while k < n && units[k] == U.tab { k += 1 }
+        if k < n && units[k] == U.star { k += 1 }
+        while k < n && (units[k] == U.space || units[k] == U.tab) { k += 1 }
+        guard k < n else { return nil }
+
+        if isLineEnd(k) {
+            var next = k
+            while next < n && units[next] != U.newline { next += 1 }
+            next += 1
+            guard next < n else { return n }
+            var end = next
+            while end < n && units[end] != U.newline { end += 1 }
+            return end
+        }
+
         let delimiter = units[k]
-        k += 1
-        while k < units.count && units[k] != delimiter && units[k] != U.newline { k += 1 }
-        return (k < units.count && units[k] == delimiter) ? k + 1 : k
+        var m = k + 1
+        while m < n && units[m] != delimiter && !isLineEnd(m) { m += 1 }
+        return (m < n && units[m] == delimiter) ? m + 1 : m
     }
 
-    /// `\begin` 之後的 `{name}`（允許中間有空白）。
-    private static func environmentName(_ units: [UInt16], after offset: Int) -> (Int, String)? {
+    /// 一個大括號參數的讀取結果。
+    struct GroupArgument {
+        /// 含大括號的範圍。
+        let range: Range<Int>
+        /// 內容的 TeX 文字（註解與其後的換行、下一行開頭空白已移除；其他換行變成空白）。
+        let text: String
+        /// 沿途的註解（`%` 到行尾，不含換行）。
+        let comments: [Range<Int>]
+    }
+
+    /// 依 TeX 讀取未定界參數的方式：略過空白（含換行）與註解，期望 `{`，讀到平衡的 `}`。
+    /// 環境名稱（`\begin`／`\end`）、document 邊界與 `\pagenumbering` 的參數都用它。
+    static func readGroupArgument(_ units: [UInt16], from offset: Int) -> GroupArgument? {
+        let n = units.count
+        var comments: [Range<Int>] = []
         var k = offset
-        while k < units.count && U.isWhitespace(units[k]) { k += 1 }
-        guard k < units.count, units[k] == U.openBrace else { return nil }
-        let nameStart = k + 1
-        var end = nameStart
-        while end < units.count && units[end] != U.closeBrace && units[end] != U.newline { end += 1 }
-        guard end < units.count, units[end] == U.closeBrace else { return nil }
-        return (end + 1, String(decoding: units[nameStart..<end], as: UTF16.self))
+
+        func skipComment() {
+            let start = k
+            while k < n && units[k] != U.newline { k += 1 }
+            comments.append(start..<k)
+        }
+
+        while k < n {
+            if U.isWhitespace(units[k]) {
+                k += 1
+            } else if units[k] == U.percent {
+                skipComment()
+            } else {
+                break
+            }
+        }
+        guard k < n, units[k] == U.openBrace else { return nil }
+
+        let open = k
+        var depth = 0
+        var text: [UInt16] = []
+        while k < n {
+            let unit = units[k]
+            switch unit {
+            case U.backslash:
+                text.append(unit)
+                if k + 1 < n { text.append(units[k + 1]) }
+                k += 2
+                continue
+            case U.percent:
+                skipComment()
+                if k < n { k += 1 }
+                while k < n && (units[k] == U.space || units[k] == U.tab) { k += 1 }
+                continue
+            case U.openBrace:
+                depth += 1
+                if depth > 1 { text.append(unit) }
+            case U.closeBrace:
+                depth -= 1
+                if depth == 0 {
+                    return GroupArgument(
+                        range: open..<(k + 1), text: String(decoding: text, as: UTF16.self), comments: comments
+                    )
+                }
+                text.append(unit)
+            case U.carriageReturn where k + 1 < n && units[k + 1] == U.newline:
+                break
+            case U.newline:
+                text.append(U.space)
+                k += 1
+                while k < n && (units[k] == U.space || units[k] == U.tab) { k += 1 }
+                continue
+            default:
+                text.append(unit)
+            }
+            k += 1
+        }
+        return nil
     }
 
     private static func find(_ needle: [UInt16], in units: [UInt16], from offset: Int) -> Int? {
@@ -353,6 +505,7 @@ struct LaTeXSourceScan {
         self.controlWords = []
         self.body = 0..<units.count
         self.pageMarkers = []
+        self.markerLines = []
         self.definitionMask = [Bool](repeating: false, count: units.count)
     }
 
@@ -411,25 +564,17 @@ struct LaTeXSourceScan {
     // MARK: - Document body
 
     private static func documentBody(units: [UInt16], words: [ControlWord], mask: [Bool]) -> Range<Int> {
-        func environmentArgument(_ word: ControlWord) -> (end: Int, name: String)? {
-            var k = word.end
-            while k < units.count && U.isWhitespace(units[k]) { k += 1 }
-            guard k < units.count, units[k] == U.openBrace else { return nil }
-            var end = k + 1
-            while end < units.count && units[end] != U.closeBrace && units[end] != U.newline { end += 1 }
-            guard end < units.count, units[end] == U.closeBrace else { return nil }
-            return (end + 1, String(decoding: units[(k + 1)..<end], as: UTF16.self))
+        func isDocumentBoundary(_ word: ControlWord, _ name: String) -> GroupArgument? {
+            guard word.name == name, !mask[word.start],
+                  let argument = readGroupArgument(units, from: word.end), argument.text == "document" else {
+                return nil
+            }
+            return argument
         }
-
-        guard let begin = words.first(where: {
-            $0.name == "begin" && !mask[$0.start] && environmentArgument($0)?.name == "document"
-        }), let bodyStart = environmentArgument(begin)?.end else {
+        guard let bodyStart = words.lazy.compactMap({ isDocumentBoundary($0, "begin") }).first?.range.upperBound else {
             return 0..<units.count
         }
-        let end = words.first(where: {
-            $0.start >= bodyStart && $0.name == "end" && !mask[$0.start]
-                && environmentArgument($0)?.name == "document"
-        })
+        let end = words.first { $0.start >= bodyStart && isDocumentBoundary($0, "end") != nil }
         return bodyStart..<(end?.start ?? units.count)
     }
 }

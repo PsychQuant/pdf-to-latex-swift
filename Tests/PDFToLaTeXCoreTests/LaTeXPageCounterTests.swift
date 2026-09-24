@@ -303,6 +303,89 @@ final class LaTeXPageCounterTests: XCTestCase {
         XCTAssertEqual(report.notes.map(\.kind), [.counterInserted(page: 1), .legacyCounterMoved(page: 18)])
         XCTAssertEqual(report.notes.first?.line, 4)
         XCTAssertEqual(LaTeXNormalizer.applyPageCounters(report.result).notes, [])
+
+        // 輸出位元組：插入的行沿用檔案的 CRLF，不混用換行。
+        let expected = [
+            "\\begin{document}",
+            "%% === Page 1 ===",
+            "",
+            "\\chapter{One}",
+            "\\setcounter{page}{1}",
+            "Text.",
+            "%% === Page 18 ===",
+            "",
+            "\\chapter{Two}",
+            "\\setcounter{page}{18}",
+            "Chapter text.",
+            "\\end{document}",
+        ].joined(separator: "\r\n")
+        XCTAssertEqual(report.result, expected)
+        XCTAssertFalse(report.result.replacingOccurrences(of: "\r\n", with: "").contains("\n"))
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(report.result), report.result)
+    }
+
+    // MARK: - Anchor end (switch arguments, same-line \end{document})
+
+    func testPagenumberingArgumentOnNextLineOrAfterComment() {
+        for separator in ["\n", "% note\n", "   % note\n   "] {
+            let input = """
+            \\begin{document}
+            %% === Page 2 ===
+            \\frontmatter
+            Preface.
+            %% === Page 9 ===
+            \\pagenumbering\(separator){arabic}
+            Text.
+            \\end{document}
+            """
+            let result = LaTeXNormalizer.insertPageCounters(input)
+            XCTAssertEqual(result, input.replacingOccurrences(
+                of: "{arabic}\nText.", with: "{arabic}\n\\setcounter{page}{9}\nText."
+            ), separator.debugDescription)
+            XCTAssertEqual(LaTeXNormalizer.insertPageCounters(result), result, separator.debugDescription)
+        }
+    }
+
+    func testAnchorSharingALineWithEndDocumentGetsCounterBeforeIt() {
+        let chapter = """
+        \\begin{document}
+        %% === Page 1 ===
+        Title.
+        %% === Page 5 ===
+        \\chapter{A}\\end{document}
+        """
+        let chapterResult = LaTeXNormalizer.insertPageCounters(chapter)
+        XCTAssertTrue(chapterResult.hasSuffix("\\chapter{A}\n\\setcounter{page}{5}\n\\end{document}"))
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(chapterResult), chapterResult)
+
+        let mainmatter = """
+        \\begin{document}
+        %% === Page 1 ===
+        \\frontmatter
+        Preface.
+        %% === Page 7 ===
+        \\mainmatter\\end{document}
+        """
+        let mainResult = LaTeXNormalizer.insertPageCounters(mainmatter)
+        XCTAssertTrue(mainResult.hasSuffix("\\mainmatter\n\\setcounter{page}{7}\n\\end{document}"))
+        XCTAssertEqual(LaTeXNormalizer.insertPageCounters(mainResult), mainResult)
+    }
+
+    // MARK: - Marker stripping (whole lines only)
+
+    func testStrippingRemovesOnlyWholeMarkerLinesAndNeverJoinsLines() {
+        let normalizer = LaTeXNormalizer(stripPageMarkers: true)
+        let untouched = [
+            "% example: %% === Page 12 ===\n\\includegraphics{figures/a.png}",
+            "%% === Page 12 === explanation\nText.",
+            "Text %% === Page 12 ===\nMore.",
+        ]
+        for source in untouched {
+            XCTAssertEqual(normalizer.normalize(source), source, source)
+        }
+        XCTAssertEqual(normalizer.normalize("A\n  %% === Page 3 ===  \nB"), "A\nB")
+        XCTAssertEqual(normalizer.normalize("A\n%% === Page 2 ===\n\nB"), "A\n\nB")
+        XCTAssertEqual(normalizer.normalize("A\r\n%% === Page 2 ===\r\nB"), "A\r\nB")
     }
 
     func testUnterminatedVerbatimHidesEverythingAfterIt() {
