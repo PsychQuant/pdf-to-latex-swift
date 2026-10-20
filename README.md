@@ -165,7 +165,8 @@ project/
 | Module | Lines | Purpose |
 |--------|-------|---------|
 | LaTeXNormalizer | 1,970 | Symbol normalization, cross-page dedup, document class fix |
-| PDFComparator | 871 | Compare original vs reconstructed PDF |
+| PDFComparator | 871 | Compare original vs reconstructed PDF (text layer, typography, page geometry) |
+| PageGeometryComparison | 95 | Page sizes of both PDFs grouped and classified against exact A4 (via pdf-visual-diff-swift); paired pages whose sizes differ |
 | PDFStructureScanner | 793 | Auto-detect chapter structure |
 | PDFContentExtractor | 556 | PDF text extraction |
 | PDFMetadataExtractor | 543 | Typography metadata (fonts, margins, paper size) |

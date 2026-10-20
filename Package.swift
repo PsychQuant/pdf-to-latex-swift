@@ -11,11 +11,14 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
+        .package(url: "https://github.com/PsychQuant/pdf-visual-diff-swift.git", from: "0.1.0"),
     ],
     targets: [
         .target(
             name: "PDFToLaTeXCore",
-            dependencies: []
+            dependencies: [
+                .product(name: "PDFVisualDiff", package: "pdf-visual-diff-swift"),
+            ]
         ),
         .executableTarget(
             name: "PDFToLaTeXCLI",

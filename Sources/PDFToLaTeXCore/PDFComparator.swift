@@ -23,6 +23,8 @@ public struct PDFComparisonReport: Codable, Sendable {
     public let averageSimilarity: Double
     public let typography: TypographyComparison?
     public let drillDown: [ChapterDrillDown]
+    /// Page sizes of both documents (absent in reports saved before 0.6.0).
+    public let pageGeometry: PageGeometryComparison?
 }
 
 /// 單章比較結果。
@@ -427,6 +429,11 @@ public struct PDFComparator: Sendable {
             print("  Low-similarity chapters: \(chNums)")
         }
 
+        // ─── Page Geometry ────────────────────────────────
+        let geometry = PageGeometryComparison.compare(original: docOrig, reproduced: docRepr)
+        printHeader("PAGE GEOMETRY")
+        geometry.printReport()
+
         // Build report
         let report = PDFComparisonReport(
             originalPath: originalURL.path,
@@ -446,7 +453,8 @@ public struct PDFComparator: Sendable {
             averageCoverage: round4(avgCov),
             averageSimilarity: round4(avgSim),
             typography: typoComparison,
-            drillDown: drillDownResults
+            drillDown: drillDownResults,
+            pageGeometry: geometry
         )
 
         // Save JSON
