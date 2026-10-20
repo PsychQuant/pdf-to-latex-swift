@@ -28,17 +28,17 @@ struct PageGeometryComparisonTests {
         return url
     }
 
-    static let pdfMaker = CGSize(width: 595.32, height: 842.04)
+    static let nearA4 = CGSize(width: 596, height: 843)
     static let letter = CGSize(width: 612, height: 792)
 
     @Test("page sizes are grouped, classified and mismatches listed")
     func groupsAndMismatches() throws {
-        let original = try #require(PDFDocument(url: Self.makePDF([Self.pdfMaker, Self.pdfMaker, Self.pdfMaker, Self.pdfMaker])))
-        let reproduced = try #require(PDFDocument(url: Self.makePDF([Self.pdfMaker, Self.pdfMaker, Self.letter, Self.pdfMaker])))
+        let original = try #require(PDFDocument(url: Self.makePDF([Self.nearA4, Self.nearA4, Self.nearA4, Self.nearA4])))
+        let reproduced = try #require(PDFDocument(url: Self.makePDF([Self.nearA4, Self.nearA4, Self.letter, Self.nearA4])))
         let geometry = PageGeometryComparison.compare(original: original, reproduced: reproduced)
 
         #expect(geometry.originalSizes == [
-            PageSizeGroup(width: 595.32, height: 842.04, classification: "nearA4", pages: [1, 2, 3, 4]),
+            PageSizeGroup(width: 596, height: 843, classification: "nearA4", pages: [1, 2, 3, 4]),
         ])
         #expect(geometry.reproducedSizes.contains(
             PageSizeGroup(width: 612, height: 792, classification: "other", pages: [3])))
@@ -56,8 +56,8 @@ struct PageGeometryComparisonTests {
 
     @Test("compare() adds the geometry section to the report and keeps the text fields")
     func reportCarriesGeometry() throws {
-        let originalURL = try Self.makePDF([Self.pdfMaker, Self.pdfMaker, Self.pdfMaker])
-        let reproducedURL = try Self.makePDF([Self.pdfMaker, Self.pdfMaker, Self.letter])
+        let originalURL = try Self.makePDF([Self.nearA4, Self.nearA4, Self.nearA4])
+        let reproducedURL = try Self.makePDF([Self.nearA4, Self.nearA4, Self.letter])
         let report = try PDFComparator().compare(originalURL: originalURL, reproducedURL: reproducedURL)
         #expect(report.pageGeometry?.mismatchedPages == [3])
         #expect(report.originalPages == 3)
@@ -66,7 +66,7 @@ struct PageGeometryComparisonTests {
 
     @Test("a report saved before the geometry field existed still decodes")
     func backwardCompatibleJSON() throws {
-        let originalURL = try Self.makePDF([Self.pdfMaker])
+        let originalURL = try Self.makePDF([Self.nearA4])
         let report = try PDFComparator().compare(originalURL: originalURL, reproducedURL: originalURL)
         var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(report)) as? [String: Any])
         object.removeValue(forKey: "pageGeometry")
