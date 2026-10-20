@@ -418,11 +418,13 @@ public struct PDFComparator: Sendable {
         } else {
             print("  Missing chapters: \(missing)")
         }
+        let geometry = PageGeometryComparison.compare(original: docOrig, reproduced: docRepr)
         if let tc = typoComparison {
             let paperOk = tc.origPaperSize == tc.reprPaperSize ? "OK" : "MISMATCH"
             let fontOk = tc.origFontFamily == tc.reprFontFamily ? "OK" : "MISMATCH"
             print("  Paper: \(paperOk)  Font: \(fontOk)")
         }
+        print("  Page sizes: \(geometry.verdict)")
         print("  Images: \(imgRepr) (reproduced) vs \(imgOrig) (original embedded)")
         if !lowSimChapters.isEmpty {
             let chNums = lowSimChapters.map { "\($0.chapter)" }.joined(separator: ", ")
@@ -430,7 +432,6 @@ public struct PDFComparator: Sendable {
         }
 
         // ─── Page Geometry ────────────────────────────────
-        let geometry = PageGeometryComparison.compare(original: docOrig, reproduced: docRepr)
         printHeader("PAGE GEOMETRY")
         geometry.printReport()
 

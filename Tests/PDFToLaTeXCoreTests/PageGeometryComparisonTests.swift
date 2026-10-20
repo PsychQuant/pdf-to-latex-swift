@@ -86,15 +86,44 @@ struct PageGeometryComparisonTests {
         #expect(geometry.mismatchedPages.isEmpty)
         let shown = try #require(geometry.originalSizes.first)
         #expect(shown.width > shown.height)
-        #expect(shown.classification == "other")
     }
 
-    @Test("labels that would print alike get more decimals")
-    func distinctLabels() {
-        let groups = [PageSizeGroup(width: 596.7752, height: 841.8898, classification: "nearA4", pages: [1]),
-                      PageSizeGroup(width: 596.7759, height: 841.8898, classification: "other", pages: [2]),
-                      PageSizeGroup(width: 612, height: 792, classification: "other", pages: [3])]
-        #expect(PageGeometryComparison.labels(groups) == ["596.7752 × 841.8898 bp", "596.7759 × 841.8898 bp", "612.00 × 792.00 bp"])
+    @Test("A4 in either orientation is classified as A4")
+    func landscapeA4() throws {
+        let a4 = CGSize(width: 210 / 25.4 * 72, height: 297 / 25.4 * 72)
+        let landscape = try #require(PDFDocument(url: Self.makePDF([CGSize(width: a4.height, height: a4.width)])))
+        let geometry = PageGeometryComparison.compare(original: landscape, reproduced: landscape)
+        #expect(geometry.originalSizes.first?.classification == "exactA4")
+    }
+
+    @Test("sizes print with as many decimals as it takes to tell them apart, across both documents")
+    func decimalsAcrossDocuments() {
+        #expect(PageGeometryComparison.decimals(for: [CGSize(width: 596, height: 843), CGSize(width: 612, height: 792)]) == 2)
+        #expect(PageGeometryComparison.decimals(for: [CGSize(width: 595.2756, height: 841.8898),
+                                                      CGSize(width: 595.28, height: 841.89)]) == 4)
+        #expect(PageGeometryComparison.decimals(for: [CGSize(width: 595.275601, height: 841.89),
+                                                      CGSize(width: 595.275602, height: 841.89)]) == 6)
+    }
+
+    @Test("a mismatched page is listed with both of its sizes, never as two identical numbers")
+    func mismatchLines() throws {
+        let exact = CGSize(width: 210 / 25.4 * 72, height: 297 / 25.4 * 72)
+        let geometry = PageGeometryComparison.compare(
+            original: try #require(PDFDocument(url: Self.makePDF([exact]))),
+            reproduced: try #require(PDFDocument(url: Self.makePDF([CGSize(width: 595.28, height: 841.89)]))))
+        let lines = geometry.reportLines()
+        #expect(lines.contains("  Pages whose size differs: 1"))
+        let detail = try #require(lines.first { $0.hasPrefix("    page 1:") })
+        let sides = detail.dropFirst("    page 1: ".count).components(separatedBy: " → ")
+        #expect(sides.count == 2 && sides[0] != sides[1], "\(detail)")
+    }
+
+    @Test("the summary verdict names the pages whose sizes differ")
+    func verdict() throws {
+        let original = try #require(PDFDocument(url: Self.makePDF([Self.nearA4, Self.nearA4, Self.nearA4])))
+        let reproduced = try #require(PDFDocument(url: Self.makePDF([Self.nearA4, Self.nearA4, Self.letter])))
+        #expect(PageGeometryComparison.compare(original: original, reproduced: reproduced).verdict == "MISMATCH (pages 3)")
+        #expect(PageGeometryComparison.compare(original: original, reproduced: original).verdict == "OK")
     }
 
     @Test("compare() adds the geometry section to the report and keeps the text fields")

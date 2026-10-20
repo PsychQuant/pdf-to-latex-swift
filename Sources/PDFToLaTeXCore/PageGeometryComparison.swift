@@ -42,7 +42,8 @@ public struct PageGeometryComparison: Codable, Equatable, Sendable {
     }
 
     /// Groups pages by exact size, so every page of a group has the same
-    /// classification.
+    /// classification. A size is classified regardless of orientation, so a
+    /// landscape A4 page is A4.
     static func groups(_ sizes: [CGSize]) -> [PageSizeGroup] {
         var order: [CGSize] = []
         var members: [CGSize: [Int]] = [:]
@@ -51,37 +52,69 @@ public struct PageGeometryComparison: Codable, Equatable, Sendable {
             members[size, default: []].append(index + 1)
         }
         return order.map { size in
-            PageSizeGroup(width: Double(size.width), height: Double(size.height),
-                          classification: PageGeometry.classify(size).rawValue, pages: members[size] ?? [])
+            let portrait = CGSize(width: min(size.width, size.height), height: max(size.width, size.height))
+            return PageSizeGroup(width: Double(size.width), height: Double(size.height),
+                                 classification: PageGeometry.classify(portrait).rawValue, pages: members[size] ?? [])
         }
     }
 
-    /// "W × H bp" for each group, with two decimals unless two groups of the
-    /// list would then print alike, in which case those get four.
-    static func labels(_ groups: [PageSizeGroup]) -> [String] {
-        func label(_ group: PageSizeGroup, _ digits: Int) -> String {
-            String(format: "%.\(digits)f × %.\(digits)f bp", group.width, group.height)
+    /// The fewest decimals (2, 4, 6, 8 or 10) at which every distinct size
+    /// in `sizes` prints differently, so two different sizes never look alike.
+    static func decimals(for sizes: [CGSize]) -> Int {
+        let distinct = Set(sizes)
+        for digits in stride(from: 2, through: 10, by: 2) where Set(distinct.map { label($0, digits) }).count == distinct.count {
+            return digits
         }
-        let short = groups.map { label($0, 2) }
-        return groups.enumerated().map { index, group in
-            short.filter { $0 == short[index] }.count > 1 ? label(group, 4) : short[index]
+        return 10
+    }
+
+    static func label(_ size: CGSize, _ digits: Int) -> String {
+        String(format: "%.\(digits)f × %.\(digits)f bp", size.width, size.height)
+    }
+
+    /// "OK", or "MISMATCH (pages …)" listing the paired pages whose sizes differ.
+    public var verdict: String {
+        mismatchedPages.isEmpty ? "OK" : "MISMATCH (pages \(Self.ranges(mismatchedPages)))"
+    }
+
+    /// Pages listed with both sizes after "Pages whose size differs".
+    static let detailLimit = 10
+
+    /// The console section, one string per line; sizes of both documents
+    /// share one precision, so equal labels always mean equal sizes.
+    func reportLines() -> [String] {
+        func size(_ group: PageSizeGroup) -> CGSize { CGSize(width: group.width, height: group.height) }
+        func sizeOf(page: Int, in groups: [PageSizeGroup]) -> CGSize? {
+            groups.first { $0.pages.contains(page) }.map(size)
         }
+        let digits = Self.decimals(for: (originalSizes + reproducedSizes).map(size))
+        var lines: [String] = []
+        for (label, groups) in [("Original", originalSizes), ("Reproduced", reproducedSizes)] {
+            lines.append("  \(label):")
+            for group in groups {
+                lines.append(String(format: "    %@  %@  %d page%@ (%@)", Self.label(size(group), digits),
+                                    group.classification, group.pages.count, group.pages.count == 1 ? "" : "s",
+                                    Self.ranges(group.pages)))
+            }
+        }
+        if mismatchedPages.isEmpty {
+            lines.append("  Page sizes match on every paired page")
+        } else {
+            lines.append("  Pages whose size differs: \(Self.ranges(mismatchedPages))")
+            for page in mismatchedPages.prefix(Self.detailLimit) {
+                guard let a = sizeOf(page: page, in: originalSizes), let b = sizeOf(page: page, in: reproducedSizes) else { continue }
+                lines.append("    page \(page): \(Self.label(a, digits)) → \(Self.label(b, digits))")
+            }
+            if mismatchedPages.count > Self.detailLimit {
+                lines.append("    … \(mismatchedPages.count - Self.detailLimit) more")
+            }
+        }
+        return lines
     }
 
     /// Console section printed by PDFComparator.compare.
     func printReport() {
-        for (label, groups) in [("Original", originalSizes), ("Reproduced", reproducedSizes)] {
-            print("  \(label):")
-            for (size, group) in zip(Self.labels(groups), groups) {
-                print(String(format: "    %@  %@  %d page%@ (%@)", size, group.classification, group.pages.count,
-                             group.pages.count == 1 ? "" : "s", Self.ranges(group.pages)))
-            }
-        }
-        if mismatchedPages.isEmpty {
-            print("  Page sizes match on every paired page")
-        } else {
-            print("  Pages whose size differs: \(Self.ranges(mismatchedPages))")
-        }
+        reportLines().forEach { print($0) }
     }
 
     /// "1-4, 7, 9-10"

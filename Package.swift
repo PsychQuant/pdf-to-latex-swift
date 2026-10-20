@@ -11,7 +11,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
-        .package(url: "https://github.com/PsychQuant/pdf-visual-diff-swift.git", from: "0.2.0"),
+        .package(url: "https://github.com/PsychQuant/pdf-visual-diff-swift.git", .upToNextMinor(from: "0.3.0")),
     ],
     targets: [
         .target(
