@@ -105,6 +105,9 @@ struct PageGeometryComparisonTests {
                                                       CGSize(width: 595.275602, height: 841.89)]) == 6)
         #expect(PageGeometryComparison.decimals(for: [CGSize(width: 595.27560000001, height: 841.89),
                                                       CGSize(width: 595.27560000002, height: 841.89)]) == 12)
+        let tiny = [CGSize(width: 595.2756, height: 841.89), CGSize(width: 595.2756.nextUp, height: 841.89)]
+        let digits = PageGeometryComparison.decimals(for: tiny)
+        #expect(PageGeometryComparison.label(tiny[0], digits) != PageGeometryComparison.label(tiny[1], digits))
     }
 
     @Test("a mismatched page is listed with both of its sizes, never as two identical numbers")

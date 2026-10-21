@@ -271,7 +271,9 @@ public struct PDFComparator: Sendable {
 
             let encMatch = mo.fontEncoding == mr.fontEncoding ? "MATCH" : "MISMATCH"
 
-            print("  Paper size:  orig=\(mo.paperSize.rawValue)  repr=\(mr.paperSize.rawValue)  [\(paperMatch)]")
+            // The nearest standard paper class of page 1 (±3 mm); exact sizes
+            // are in the PAGE GEOMETRY section.
+            print("  Paper class: orig=\(mo.paperSize.rawValue)  repr=\(mr.paperSize.rawValue)  [\(paperMatch)] (page 1, ±3 mm)")
             print("  Font family: orig=\(mo.dominantFontFamily.rawValue)  repr=\(mr.dominantFontFamily.rawValue)  [\(fontMatch)]")
             print("  Encoding:    orig=\(mo.fontEncoding.rawValue)  repr=\(mr.fontEncoding.rawValue)  [\(encMatch)]")
             print("  Body size:   orig=\(mo.bodyFontSizePt)pt  repr=\(mr.bodyFontSizePt)pt  [\(sizeMatch)]")
@@ -422,8 +424,8 @@ public struct PDFComparator: Sendable {
         if let tc = typoComparison {
             let paperOk = tc.origPaperSize == tc.reprPaperSize ? "OK" : "MISMATCH"
             let fontOk = tc.origFontFamily == tc.reprFontFamily ? "OK" : "MISMATCH"
-            // The paper class (a4paper, letterpaper, …) named in the TeX
-            // source or inferred from it; exact page sizes are the line below.
+            // The nearest standard paper class of page 1's MediaBox (±3 mm),
+            // not an exact size; exact page sizes are the line below.
             print("  Paper class: \(paperOk)  Font: \(fontOk)")
         }
         print("  Page sizes: \(geometry.verdict)")
