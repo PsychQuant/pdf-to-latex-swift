@@ -103,6 +103,8 @@ struct PageGeometryComparisonTests {
                                                       CGSize(width: 595.28, height: 841.89)]) == 4)
         #expect(PageGeometryComparison.decimals(for: [CGSize(width: 595.275601, height: 841.89),
                                                       CGSize(width: 595.275602, height: 841.89)]) == 6)
+        #expect(PageGeometryComparison.decimals(for: [CGSize(width: 595.27560000001, height: 841.89),
+                                                      CGSize(width: 595.27560000002, height: 841.89)]) == 12)
     }
 
     @Test("a mismatched page is listed with both of its sizes, never as two identical numbers")

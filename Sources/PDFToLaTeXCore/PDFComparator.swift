@@ -422,7 +422,9 @@ public struct PDFComparator: Sendable {
         if let tc = typoComparison {
             let paperOk = tc.origPaperSize == tc.reprPaperSize ? "OK" : "MISMATCH"
             let fontOk = tc.origFontFamily == tc.reprFontFamily ? "OK" : "MISMATCH"
-            print("  Paper: \(paperOk)  Font: \(fontOk)")
+            // The paper class (a4paper, letterpaper, …) named in the TeX
+            // source or inferred from it; exact page sizes are the line below.
+            print("  Paper class: \(paperOk)  Font: \(fontOk)")
         }
         print("  Page sizes: \(geometry.verdict)")
         print("  Images: \(imgRepr) (reproduced) vs \(imgOrig) (original embedded)")

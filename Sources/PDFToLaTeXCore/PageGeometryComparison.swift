@@ -58,14 +58,15 @@ public struct PageGeometryComparison: Codable, Equatable, Sendable {
         }
     }
 
-    /// The fewest decimals (2, 4, 6, 8 or 10) at which every distinct size
-    /// in `sizes` prints differently, so two different sizes never look alike.
+    /// The fewest decimals (2, 4, …, 16) at which every distinct size in
+    /// `sizes` prints differently, so two different sizes never look alike;
+    /// 16 decimals tell apart any two page sizes a PDF can hold.
     static func decimals(for sizes: [CGSize]) -> Int {
         let distinct = Set(sizes)
-        for digits in stride(from: 2, through: 10, by: 2) where Set(distinct.map { label($0, digits) }).count == distinct.count {
+        for digits in stride(from: 2, through: 16, by: 2) where Set(distinct.map { label($0, digits) }).count == distinct.count {
             return digits
         }
-        return 10
+        return 16
     }
 
     static func label(_ size: CGSize, _ digits: Int) -> String {
