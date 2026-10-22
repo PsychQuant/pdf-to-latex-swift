@@ -2,6 +2,22 @@ import XCTest
 @testable import PDFToLaTeXCore
 
 final class TexCompileCheckerTests: XCTestCase {
+    private func makeTempDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TexCompileCheckerTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func isCommandAvailable(_ command: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["sh", "-c", "command -v \(command) >/dev/null 2>&1"]
+        try? process.run()
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
     func testParseUndefinedCommand() {
         let log = """
         ! Undefined control sequence.
@@ -128,5 +144,63 @@ final class TexCompileCheckerTests: XCTestCase {
         XCTAssertEqual(decoded.errors[0].category, .undefinedCommand)
         XCTAssertEqual(decoded.warningCount, 2)
         XCTAssertFalse(decoded.success)
+    }
+
+    func testCompileMalformedTexReturnsPromptly() throws {
+        guard isCommandAvailable("pdflatex") else {
+            throw XCTSkip("pdflatex is not installed")
+        }
+
+        let tempDir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let texURL = tempDir.appendingPathComponent("broken.tex")
+        let source = """
+        \\documentclass{article}
+        \\begin{document}
+        \\textbf{missing close
+        \\end{document}
+        """
+        try source.write(to: texURL, atomically: true, encoding: .utf8)
+
+        let checker = TexCompileChecker(options: TexCompileOptions(timeoutSeconds: 5))
+        let start = Date()
+        let report = try checker.compile(texFileURL: texURL)
+        let duration = Date().timeIntervalSince(start)
+
+        XCTAssertLessThan(duration, 5)
+        XCTAssertFalse(report.success)
+    }
+
+    func testCompileTimeoutReturnsFailedReport() throws {
+        let tempDir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let fakePdfLatex = tempDir.appendingPathComponent("pdflatex-sleeps")
+        try """
+        #!/bin/sh
+        sleep 10
+        """.write(to: fakePdfLatex, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: fakePdfLatex.path
+        )
+
+        let texURL = tempDir.appendingPathComponent("input.tex")
+        try "\\documentclass{article}\\begin{document}x\\end{document}"
+            .write(to: texURL, atomically: true, encoding: .utf8)
+
+        let checker = TexCompileChecker(options: TexCompileOptions(
+            pdflatexCommand: fakePdfLatex.path,
+            timeoutSeconds: 0.2
+        ))
+        let start = Date()
+        let report = try checker.compile(texFileURL: texURL)
+        let duration = Date().timeIntervalSince(start)
+
+        XCTAssertLessThan(duration, 3)
+        XCTAssertFalse(report.success)
+        XCTAssertEqual(report.errors.first?.category, .timeout)
+        XCTAssertTrue(report.errors.first?.message.contains("timed out") == true)
     }
 }
